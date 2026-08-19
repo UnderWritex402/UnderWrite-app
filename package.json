@@ -2,9 +2,14 @@
   "name": "underwrite-app",
   "private": true,
   "version": "0.1.0",
-  "description": "Underwrite — verification agent service for invoice financing",
-  "workspaces": ["packages/*"],
-  "engines": { "node": ">=20" },
+  "type": "module",
+  "description": "Underwrite \u2014 verification agent service for invoice financing",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
