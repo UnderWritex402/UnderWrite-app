@@ -110,6 +110,77 @@ export function cacLookupConfig(env?: NodeJS.ProcessEnv): CacLookupConfig {
   return parse("CAC lookup", cacLookupSchema, env);
 }
 
+/** The GOAT networks AgentKit's actions declare support for. */
+export const GOAT_NETWORKS = ["goat-mainnet", "goat-testnet"] as const;
+export type GoatNetwork = (typeof GOAT_NETWORKS)[number];
+
+/**
+ * GOAT AgentKit wiring.
+ *
+ * `AGENT_EVM_PRIVATE_KEY` is deliberately the only name for the secp256k1
+ * key. GOAT's own docs call it `PRIVATE_KEY`; that name is too vague to sit
+ * next to `STELLAR_SUBMITTER_SECRET` in one `.env` without inviting exactly
+ * the confusion NFR-1 exists to prevent, so it is mapped onto AgentKit at the
+ * single point of construction instead of being carried as a second variable.
+ *
+ * The ERC-8004 registry addresses are not configured here at all: AgentKit
+ * resolves them from `network` at call time, so there is one source of truth
+ * and no address to drift.
+ */
+const goatSchema = z.object({
+  GOAT_NETWORK: z.enum(GOAT_NETWORKS).default("goat-testnet"),
+  /** Optional override; AgentKit's built-in RPC for the network is the default. */
+  GOAT_RPC_URL: url.optional(),
+});
+
+export type GoatConfig = z.infer<typeof goatSchema>;
+
+export function goatConfig(env?: NodeJS.ProcessEnv): GoatConfig {
+  return parse("GOAT network", goatSchema, env);
+}
+
+/**
+ * ERC-8004 identity.
+ *
+ * `ERC8004_AGENT_ID` is a uint256 assigned by the Identity Registry and is a
+ * different identifier from `AGENT_ID`, which is the Soroban Symbol the
+ * attestation is signed under. Two registries, two namespaces; conflating
+ * them would produce attestations signed under an id no contract knows.
+ *
+ * It is optional because it does not exist until the agent has registered.
+ */
+const identitySchema = z.object({
+  ERC8004_AGENT_ID: z
+    .string()
+    .regex(/^\d+$/, "must be a numeric uint256 agent id")
+    .optional(),
+  /** URL of the hosted registration.json. Must be durable, not temporary. */
+  AGENT_REGISTRATION_URI: z.string().min(1).optional(),
+});
+
+export type IdentityConfig = z.infer<typeof identitySchema>;
+
+export function identityConfig(env?: NodeJS.ProcessEnv): IdentityConfig {
+  return parse("ERC-8004 identity", identitySchema, env);
+}
+
+/**
+ * x402 merchant portal. Underwrite is the *merchant*: TrusTrove pays for a
+ * report and this service receives that payment, so it needs merchant-side
+ * credentials, not a payer wallet.
+ */
+const merchantSchema = z.object({
+  MERCHANT_PORTAL_BASE_URL: url,
+  MERCHANT_PORTAL_EMAIL: z.string().email(),
+  MERCHANT_PORTAL_PASSWORD: z.string().min(1),
+});
+
+export type MerchantConfig = z.infer<typeof merchantSchema>;
+
+export function merchantConfig(env?: NodeJS.ProcessEnv): MerchantConfig {
+  return parse("x402 merchant portal", merchantSchema, env);
+}
+
 const evidenceStoreSchema = z.object({
   EVIDENCE_STORE_DIR: z.string().min(1).default("./.evidence"),
 });
