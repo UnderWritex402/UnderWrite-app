@@ -18,7 +18,7 @@ const CLEAN_PDF = new TextEncoder().encode(
 
 function request(): VerificationRequest {
   return {
-    invoiceId: "42",
+    invoiceId: `0x${"7f".repeat(32)}`,
     document: CLEAN_PDF,
     documentFilename: "invoice.pdf",
     amountMinor: 500_000_00n,

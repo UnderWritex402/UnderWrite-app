@@ -19,7 +19,7 @@ import type {
 } from "../src/types.js";
 
 const request: VerificationRequest = {
-  invoiceId: "inv-1",
+  invoiceId: `0x${"7f".repeat(32)}`,
   document: new Uint8Array([1]),
   documentFilename: "invoice.pdf",
   amountMinor: 500_000_00n,

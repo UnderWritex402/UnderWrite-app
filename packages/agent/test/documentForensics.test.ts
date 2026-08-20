@@ -38,7 +38,7 @@ function request(
   invoiceDate = "2026-01-05",
 ): VerificationRequest {
   return {
-    invoiceId: "inv-1",
+    invoiceId: `0x${"7f".repeat(32)}`,
     document,
     documentFilename: "invoice.pdf",
     amountMinor: 500_000_00n,

@@ -169,13 +169,18 @@ inputs can serialise identically.
 ```
 offset  size  field
 0       25    domain separator, ASCII "UNDERWRITE_ATTESTATION_V1"
-25      16    invoice_id      u128 big-endian
-41      4     risk_score      u32 big-endian, basis points
-45      32    evidence_hash   keccak256 of the canonical report
-77      1     agent_id length u8 (1–32)
-78      N     agent_id        ASCII, Soroban Symbol charset
-78+N    32    nonce
+25      32    invoice_id      raw BytesN<32>, copied verbatim
+57      4     risk_score      u32 big-endian, basis points
+61      32    evidence_hash   keccak256 of the canonical report
+93      1     agent_id length u8 (1–32)
+94      N     agent_id        ASCII, Soroban Symbol charset
+94+N    32    nonce
 ```
+
+`invoice_id` is TrusTrove's `BytesN<32>` and is copied in as raw bytes, never
+parsed as a number. A numeric round-trip would drop leading zero bytes and
+collapse distinct ids onto the same integer, so the contract would rebuild a
+different preimage and recovery would fail.
 
 `payload` on the wire is this **preimage**, not its hash — so the contract can
 check that the invoice id and risk score inside it match what it is storing,

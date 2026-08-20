@@ -28,7 +28,7 @@ const config: SubmissionConfig = {
 };
 
 const signed: SignedAttestation = {
-  invoiceId: "42",
+  invoiceId: `0x${"7f".repeat(32)}`,
   riskScore: 1_250,
   evidenceHash: `0x${"ab".repeat(32)}`,
   agentId: "underwrite_v1",

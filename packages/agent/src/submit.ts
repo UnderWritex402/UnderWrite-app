@@ -3,7 +3,6 @@ import {
   Contract,
   Keypair,
   TransactionBuilder,
-  nativeToScVal,
   rpc,
   xdr,
 } from "@stellar/stellar-sdk";
@@ -118,18 +117,26 @@ export function buildServer(config: SubmissionConfig): SorobanServer {
 /**
  * Encodes the contract arguments.
  *
- * `payload` and `signature` are both ScVal byte strings on the wire; the
- * contract's `Bytes` versus `BytesN<65>` distinction is enforced on its side,
- * so the 65-byte length is asserted here rather than discovered in a failed
- * simulation.
+ * All three are ScVal byte strings on the wire. `invoice_id` is a
+ * `BytesN<32>` — raw bytes, never a numeric type — and `signature` a
+ * `BytesN<65>`; the contract enforces those widths on its side, so both are
+ * asserted here rather than discovered in a failed simulation.
  */
 function buildArgs(
-  invoiceId: string,
+  invoiceId: `0x${string}`,
   payload: `0x${string}`,
   signature: `0x${string}`,
 ): xdr.ScVal[] {
+  const invoiceIdBytes = Buffer.from(invoiceId.slice(2), "hex");
   const payloadBytes = Buffer.from(payload.slice(2), "hex");
   const signatureBytes = Buffer.from(signature.slice(2), "hex");
+
+  if (invoiceIdBytes.length !== 32) {
+    throw new SubmissionError(
+      "simulate",
+      `invoice_id must be 32 bytes for BytesN<32>, got ${invoiceIdBytes.length}`,
+    );
+  }
 
   if (signatureBytes.length !== 65) {
     throw new SubmissionError(
@@ -139,7 +146,7 @@ function buildArgs(
   }
 
   return [
-    nativeToScVal(BigInt(invoiceId), { type: "u128" }),
+    xdr.ScVal.scvBytes(invoiceIdBytes),
     xdr.ScVal.scvBytes(payloadBytes),
     xdr.ScVal.scvBytes(signatureBytes),
   ];

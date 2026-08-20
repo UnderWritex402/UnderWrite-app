@@ -9,7 +9,7 @@ const config: PlatformHistoryConfig = {
 
 function invoice(overrides: Partial<VerificationRequest> = {}): VerificationRequest {
   return {
-    invoiceId: "inv-1",
+    invoiceId: `0x${"7f".repeat(32)}`,
     document: new Uint8Array([1, 2, 3]),
     documentFilename: "invoice.pdf",
     amountMinor: 500_000_00n,
@@ -63,7 +63,11 @@ describe("fetchPlatformHistory", () => {
   it("flags a duplicate document hash but ignores the invoice's own id", async () => {
     const result = await fetchPlatformHistory(invoice(), config, {
       request: router({
-        "by-document-hash": { invoiceIds: ["inv-1", "inv-0"] },
+        // The first entry is this invoice's own id, which is not a
+        // duplicate of itself; the second is a genuine prior submission.
+        "by-document-hash": {
+          invoiceIds: [`0x${"7f".repeat(32)}`, `0x${"0e".repeat(32)}`],
+        },
         GSELLER: cleanHistory("GSELLER"),
         GBUYER: cleanHistory("GBUYER"),
       }),
@@ -72,7 +76,7 @@ describe("fetchPlatformHistory", () => {
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
     expect(result.result.duplicateInvoice).toBe(true);
-    expect(result.result.duplicateOfInvoiceIds).toEqual(["inv-0"]);
+    expect(result.result.duplicateOfInvoiceIds).toEqual([`0x${"0e".repeat(32)}`]);
   });
 
   it("marks cold start when neither party has any record", async () => {
