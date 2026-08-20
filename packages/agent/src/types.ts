@@ -139,7 +139,11 @@ export interface DocumentMetadata {
 
 /** Input describing the invoice under verification. */
 export interface VerificationRequest {
-  invoiceId: string;
+  /**
+   * TrusTrove's invoice id: 0x-prefixed 32 bytes, matching the contract's
+   * `BytesN<32>`. Not a number — see the note in `attestation.ts`.
+   */
+  invoiceId: `0x${string}`;
   /** Raw invoice document bytes, for forensics. */
   document: Uint8Array;
   /** Document filename, used only for type hinting. */

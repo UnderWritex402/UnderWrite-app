@@ -15,13 +15,20 @@ import type { EvidenceReport } from "./types.js";
  * ```text
  * offset  size  field
  * 0       25    domain separator, ASCII "UNDERWRITE_ATTESTATION_V1"
- * 25      16    invoice_id,   u128 big-endian
- * 41      4     risk_score,   u32 big-endian, basis points 0-10000
- * 45      32    evidence_hash, keccak256 of the canonical evidence report
- * 77      1     agent_id length, u8 (1-32)
- * 78      N     agent_id, ASCII, matching the Soroban Symbol charset
- * 78+N    32    nonce
+ * 25      32    invoice_id,   raw BytesN<32>, copied verbatim
+ * 57      4     risk_score,   u32 big-endian, basis points 0-10000
+ * 61      32    evidence_hash, keccak256 of the canonical evidence report
+ * 93      1     agent_id length, u8 (1-32)
+ * 94      N     agent_id, ASCII, matching the Soroban Symbol charset
+ * 94+N    32    nonce
  * ```
+ *
+ * `invoice_id` is a `BytesN<32>` on the TrusTrove side
+ * (`list_for_financing(env, invoice_id: BytesN<32>, discount_bps: u32)`),
+ * so it is copied in as raw bytes. It is deliberately never parsed as a
+ * number: a numeric round-trip would drop leading zero bytes and normalise
+ * distinct ids onto the same integer, so the contract would rebuild a
+ * different preimage and signature recovery would fail.
  *
  * The signed digest is `keccak256` of that whole preimage. The preimage
  * itself is what goes on the wire as `payload`, so the contract can check
@@ -32,7 +39,7 @@ import type { EvidenceReport } from "./types.js";
 export const DOMAIN_SEPARATOR = "UNDERWRITE_ATTESTATION_V1";
 
 const DOMAIN_BYTES = new TextEncoder().encode(DOMAIN_SEPARATOR);
-const U128_BYTES = 16;
+const INVOICE_ID_BYTES = 32;
 const U32_BYTES = 4;
 const HASH_BYTES = 32;
 const NONCE_BYTES = 32;
@@ -47,8 +54,8 @@ export class AttestationError extends Error {
 }
 
 export interface AttestationFields {
-  /** Decimal string; must fit in a u128 to match the contract's parameter. */
-  invoiceId: string;
+  /** 0x-prefixed 32 bytes, matching the contract's `BytesN<32>`. */
+  invoiceId: `0x${string}`;
   /** Basis points, 0-10000. Integer only. */
   riskScore: number;
   /** 0x-prefixed keccak256 of the canonical evidence report. */
@@ -134,14 +141,11 @@ export function buildAttestationPayload(fields: AttestationFields): {
   payload: `0x${string}`;
   digest: `0x${string}`;
 } {
-  let invoiceId: bigint;
-  try {
-    invoiceId = BigInt(fields.invoiceId);
-  } catch {
-    throw new AttestationError(
-      `invoiceId "${fields.invoiceId}" is not an integer; the contract takes a u128`,
-    );
-  }
+  const invoiceIdBytes = hexToBytes(
+    fields.invoiceId,
+    INVOICE_ID_BYTES,
+    "invoiceId",
+  );
 
   if (!Number.isInteger(fields.riskScore)) {
     throw new AttestationError(
@@ -157,7 +161,7 @@ export function buildAttestationPayload(fields: AttestationFields): {
   const agentIdBytes = encodeAgentId(fields.agentId);
   const parts = [
     DOMAIN_BYTES,
-    encodeUint(invoiceId, U128_BYTES, "invoiceId"),
+    invoiceIdBytes,
     encodeUint(BigInt(fields.riskScore), U32_BYTES, "riskScore"),
     hexToBytes(fields.evidenceHash, HASH_BYTES, "evidenceHash"),
     Uint8Array.of(agentIdBytes.length),
