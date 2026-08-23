@@ -14,8 +14,8 @@ This repo is the off-chain agent service. Two other pieces complete the system:
 | Piece | Where | Status |
 |---|---|---|
 | `agent-registry` (Soroban) | `underwrite-contract` | Deployed: `CB22R3OJUCQGHZCXH5WAONTURVMSGDIDGIGXA2XQ6UNXDUKYWZKVTER5` |
-| `submit_attestation` + listing gate | `TrusTrove-contract` | External dependency |
-| Verification agent service | **this repo** | Built, 111 tests |
+| `submit_attestation` + listing gate | `TrusTrove-contract` | Merged (PR #534) but **not deployed** — see Known limits |
+| Verification agent service | **this repo** | Built, 121 tests |
 
 ---
 
@@ -162,42 +162,52 @@ A few deliberate choices:
 
 ## Attestation wire format
 
-The Soroban contract must rebuild these exact bytes to recover the signer.
-Every field is fixed-width or explicitly length-prefixed, so no two different
-inputs can serialise identically.
+`payload` is the **XDR serialisation of TrusTrove's `AttestationPayload`
+struct**. This is not a format Underwrite chooses: `submit_attestation` calls
+`AttestationPayload::from_xdr(&env, &payload)` and hashes those same bytes, so
+the encoding has to be byte-identical to what `soroban_sdk`'s `to_xdr`
+produces on the Rust side.
 
+```rust
+pub struct AttestationPayload {
+    pub domain_separator: BytesN<32>,  // "TrusTrove.InvoiceAttestation.v1_"
+    pub invoice_id:       BytesN<32>,
+    pub risk_score:       u32,         // basis points
+    pub evidence_hash:    BytesN<32>,
+    pub agent_id:         Symbol,
+    pub nonce:            u64,
+}
 ```
-offset  size  field
-0       25    domain separator, ASCII "UNDERWRITE_ATTESTATION_V1"
-25      32    invoice_id      raw BytesN<32>, copied verbatim
-57      4     risk_score      u32 big-endian, basis points
-61      32    evidence_hash   keccak256 of the canonical report
-93      1     agent_id length u8 (1–32)
-94      N     agent_id        ASCII, Soroban Symbol charset
-94+N    32    nonce
-```
 
-`invoice_id` is TrusTrove's `BytesN<32>` and is copied in as raw bytes, never
-parsed as a number. A numeric round-trip would drop leading zero bytes and
-collapse distinct ids onto the same integer, so the contract would rebuild a
-different preimage and recovery would fail.
+A `#[contracttype]` struct encodes as an `ScVal::Map` whose keys are the field
+names as `ScSymbol`, **sorted lexicographically** — `agent_id`,
+`domain_separator`, `evidence_hash`, `invoice_id`, `nonce`, `risk_score` — not
+in declaration order. That ordering was confirmed against a live deployed
+contract, not assumed: agent-registry's `get_agent` returns its `Agent` struct
+as an `ScMap` with `active` before `pubkey`.
 
-`payload` on the wire is this **preimage**, not its hash — so the contract can
-check that the invoice id and risk score inside it match what it is storing,
-rather than trusting a bare 32 bytes. The signed digest is `keccak256(payload)`.
+Passing the whole payload rather than a bare hash is what lets the contract
+verify the `invoice_id` inside it matches the argument it was called with, so
+a signature cannot be lifted onto a different invoice. The signed digest is
+`keccak256(payload)`.
+
+`invoice_id` is a `BytesN<32>`, never parsed as a number — a numeric
+round-trip would drop leading zero bytes and collapse distinct ids onto the
+same integer.
 
 The signature is 65 bytes: `r ‖ s ‖ recovery_id`, where recovery id is **0 or
-1** — not the 27/28 Ethereum convention — because that is what Soroban's
-`recover_key_ecdsa_secp256k1` expects.
+1** — not the 27/28 Ethereum convention — because the contract does
+`sig_bytes[64] as u32` and hands it to `secp256k1_recover`.
 
-The nonce is derived deterministically from `(agentId, invoiceId,
-evidenceHash)`. Re-running verification on unchanged evidence therefore
-produces byte-identical output, so a retry after a dropped transaction cannot
-create a second, differently-signed attestation. Replay across invoices is
-prevented by the invoice id being inside the preimage; replay of the same
-invoice by the contract's own duplicate check.
+The nonce is a `u64`, derived deterministically from `(agentId, invoiceId,
+evidenceHash)` by truncating a keccak digest. Re-running verification on
+unchanged evidence therefore produces byte-identical output, so a retry after
+a dropped transaction cannot create a second, differently-signed attestation.
+The nonce is not tracked on-chain — replay is prevented by the contract's
+one-attestation-per-invoice storage check, and cross-invoice replay by the
+`invoice_id` being inside the signed payload.
 
-Full layout and rationale: [`attestation.ts`](packages/agent/src/attestation.ts).
+Full encoding and rationale: [`attestation.ts`](packages/agent/src/attestation.ts).
 
 ---
 
@@ -254,7 +264,7 @@ network.
 npm install
 cp .env.example .env      # then fill it in
 npm run typecheck
-npm test                  # 111 tests, no network required
+npm test                  # 121 tests, no network required
 npm run build
 ```
 
@@ -294,6 +304,16 @@ Until (2) lands, `submit.ts` runs against a Soroban stub mirroring
 
 These are real, and stated rather than buried:
 
+- **TrusTrove's hook is not deployed yet.** `submit_attestation` and the
+  `VerificationRequired` gate are merged on `origin/main` (PR #534) but the
+  live invoice contract `CA4O3MR7…` does not export them — verified by
+  reading the deployed contract's own spec off testnet. Until it is
+  redeployed, **the listing gate blocks nothing** and no attestation can be
+  submitted. This is the single biggest gap between "built" and "working".
+- **The end-to-end flow has never run on testnet.** Every claim in this README
+  about the agent side is backed by the offline test suite and by the two
+  on-chain reads noted above; the full pay → research → sign → submit → list
+  path is still unproven.
 - **The agent registry is admin-curated.** One agent at launch, added by an
   admin key. A disclosed centralisation point, not a solved problem.
 - **Cold start.** Platform history has no signal for a brand-new
@@ -317,7 +337,7 @@ Nothing here asks to be taken on trust:
 1. Read the attestation off Soroban: `risk_score`, `evidence_hash`, `agent_id`.
 2. Fetch the evidence report by that hash.
 3. Recompute `hashEvidenceReport(report)` — it must equal `evidence_hash`.
-4. Rebuild the preimage from the layout above and check the signature recovers
+4. Rebuild the XDR payload from the struct above and check the signature recovers
    to a public key that `agent-registry` lists as active.
 5. Read `scoreBreakdown` and disagree with the reasoning if you want to. Every
    sub-score carries the reasons that produced it.
