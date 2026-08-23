@@ -14,7 +14,7 @@ This repo is the off-chain agent service. Two other pieces complete the system:
 | Piece | Where | Status |
 |---|---|---|
 | `agent-registry` (Soroban) | `underwrite-contract` | Deployed: `CB22R3OJUCQGHZCXH5WAONTURVMSGDIDGIGXA2XQ6UNXDUKYWZKVTER5` |
-| `submit_attestation` + listing gate | `TrusTrove-contract` | Merged (PR #534) but **not deployed** — see Known limits |
+| `submit_attestation` + listing gate | `TrusTrove-contract` | Deployed: `CAMHFB4CRE3AEVP7ZJGZRQTVIUCZXHIP7KTLYTC44CN4S2QBAOQVAMZX` |
 | Verification agent service | **this repo** | Built, 121 tests |
 
 ---
@@ -304,16 +304,16 @@ Until (2) lands, `submit.ts` runs against a Soroban stub mirroring
 
 These are real, and stated rather than buried:
 
-- **TrusTrove's hook is not deployed yet.** `submit_attestation` and the
-  `VerificationRequired` gate are merged on `origin/main` (PR #534) but the
-  live invoice contract `CA4O3MR7…` does not export them — verified by
-  reading the deployed contract's own spec off testnet. Until it is
-  redeployed, **the listing gate blocks nothing** and no attestation can be
-  submitted. This is the single biggest gap between "built" and "working".
-- **The end-to-end flow has never run on testnet.** Every claim in this README
-  about the agent side is backed by the offline test suite and by the two
-  on-chain reads noted above; the full pay → research → sign → submit → list
-  path is still unproven.
+- **The paid end-to-end flow has not run yet.** The *attestation* half is
+  verified against the live contract (see below), but the full
+  pay → research → sign → submit → list path has never run, because the x402
+  merchant credentials and the CAC API key are not yet provisioned.
+- **`submit.ts` has simulated, not sent.** The encoder and signature are
+  proven — a real signed payload for an unattested testnet invoice simulates
+  successfully through `submit_attestation`, meaning the contract decoded the
+  XDR, matched the domain separator and invoice id, recovered the pubkey, and
+  found it active in agent-registry. The send path (assemble → sign → poll)
+  has not carried a real transaction.
 - **The agent registry is admin-curated.** One agent at launch, added by an
   admin key. A disclosed centralisation point, not a solved problem.
 - **Cold start.** Platform history has no signal for a brand-new
