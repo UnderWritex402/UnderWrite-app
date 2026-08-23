@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import { keccak256, recoverPublicKey } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -27,54 +28,95 @@ const fields: AttestationFields = {
   riskScore: 1_250,
   evidenceHash: `0x${"ab".repeat(32)}`,
   agentId: "underwrite_v1",
-  nonce: `0x${"cd".repeat(32)}`,
+  nonce: 42n,
 };
 
+/** Decodes a payload back into the ScVal the contract's `from_xdr` will see. */
+function decode(payload: `0x${string}`): xdr.ScVal {
+  return xdr.ScVal.fromXDR(Buffer.from(payload.slice(2), "hex"));
+}
+
+function entries(payload: `0x${string}`): Array<[string, xdr.ScVal]> {
+  return decode(payload)
+    .map()
+    .map((e) => [e.key().sym().toString(), e.val()] as [string, xdr.ScVal]);
+}
+
 describe("buildAttestationPayload", () => {
-  it("lays the preimage out at the documented offsets", () => {
+  it("encodes an ScMap matching the contract's AttestationPayload struct", () => {
     const { payload } = buildAttestationPayload(fields);
-    const bytes = Buffer.from(payload.slice(2), "hex");
+    const decoded = decode(payload);
 
-    const agentIdLength = Buffer.from(fields.agentId).length;
-    expect(bytes.length).toBe(25 + 32 + 4 + 32 + 1 + agentIdLength + 32);
+    expect(decoded.switch().name).toBe("scvMap");
 
-    expect(bytes.subarray(0, 25).toString("ascii")).toBe(DOMAIN_SEPARATOR);
-    expect(bytes.subarray(25, 57).toString("hex")).toBe(INVOICE_ID.slice(2));
-    expect(bytes.readUInt32BE(57)).toBe(1_250);
-    expect(bytes.subarray(61, 93).toString("hex")).toBe("ab".repeat(32));
-    expect(bytes[93]).toBe(agentIdLength);
-    expect(bytes.subarray(94, 94 + agentIdLength).toString("ascii")).toBe(
-      fields.agentId,
+    const byKey = new Map(entries(payload));
+    expect([...byKey.keys()].sort()).toEqual([
+      "agent_id",
+      "domain_separator",
+      "evidence_hash",
+      "invoice_id",
+      "nonce",
+      "risk_score",
+    ]);
+
+    // Field types must match the Rust struct exactly, or from_xdr rejects.
+    expect(byKey.get("domain_separator")?.switch().name).toBe("scvBytes");
+    expect(byKey.get("invoice_id")?.switch().name).toBe("scvBytes");
+    expect(byKey.get("evidence_hash")?.switch().name).toBe("scvBytes");
+    expect(byKey.get("agent_id")?.switch().name).toBe("scvSymbol");
+    expect(byKey.get("nonce")?.switch().name).toBe("scvU64");
+    expect(byKey.get("risk_score")?.switch().name).toBe("scvU32");
+  });
+
+  it("orders map keys lexicographically, as soroban_sdk requires", () => {
+    // Declaration order in the Rust struct is domain_separator, invoice_id,
+    // risk_score, evidence_hash, agent_id, nonce. The wire order is NOT that.
+    const keys = entries(buildAttestationPayload(fields).payload).map(
+      ([k]) => k,
     );
-    expect(bytes.subarray(94 + agentIdLength).toString("hex")).toBe(
-      "cd".repeat(32),
-    );
+    expect(keys).toEqual([...keys].sort());
+    expect(keys).toEqual([
+      "agent_id",
+      "domain_separator",
+      "evidence_hash",
+      "invoice_id",
+      "nonce",
+      "risk_score",
+    ]);
+  });
+
+  it("carries the contract's exact 32-byte domain separator", () => {
+    expect(Buffer.from(DOMAIN_SEPARATOR, "ascii")).toHaveLength(32);
+    expect(DOMAIN_SEPARATOR).toBe("TrusTrove.InvoiceAttestation.v1_");
+
+    const byKey = new Map(entries(buildAttestationPayload(fields).payload));
+    const separator = byKey.get("domain_separator");
+    expect(separator?.bytes().toString("ascii")).toBe(DOMAIN_SEPARATOR);
   });
 
   it("copies invoice_id in verbatim, preserving leading and interior zeros", () => {
-    const { payload } = buildAttestationPayload(fields);
-    const bytes = Buffer.from(payload.slice(2), "hex");
+    const byKey = new Map(entries(buildAttestationPayload(fields).payload));
+    const encoded = byKey.get("invoice_id")?.bytes();
 
-    // The exact bytes, not a numeric normalisation of them. `BigInt(id)` would
-    // render this same value without its leading zero byte.
-    expect(bytes.subarray(25, 57).toString("hex")).toBe(INVOICE_ID.slice(2));
-    expect(bytes[25]).toBe(0x00);
+    expect(encoded?.toString("hex")).toBe(INVOICE_ID.slice(2));
+    expect(encoded).toHaveLength(32);
+    expect(encoded?.[0]).toBe(0x00);
   });
 
-  it("distinguishes ids that a numeric encoding would collapse together", () => {
-    // These are different BytesN<32> values but the same integer. If invoice_id
-    // were parsed as a number, both would produce an identical digest and an
-    // attestation for one invoice would verify against the other.
-    const withLeadingZeros = `0x${"00".repeat(31)}2a` as const;
-    const bare = `0x${"00".repeat(30)}2a00` as const;
+  it("round-trips every field back to its input value", () => {
+    const decoded = scValToNative(
+      decode(buildAttestationPayload(fields).payload),
+    ) as Record<string, unknown>;
 
-    const a = buildAttestationPayload({ ...fields, invoiceId: withLeadingZeros });
-    const b = buildAttestationPayload({ ...fields, invoiceId: bare });
-
-    expect(a.digest).not.toBe(b.digest);
+    expect(decoded["risk_score"]).toBe(1_250);
+    expect(decoded["nonce"]).toBe(42n);
+    expect(decoded["agent_id"]).toBe("underwrite_v1");
+    expect(Buffer.from(decoded["invoice_id"] as Uint8Array).toString("hex")).toBe(
+      INVOICE_ID.slice(2),
+    );
   });
 
-  it("digests the preimage with keccak256", () => {
+  it("digests the payload with keccak256", () => {
     const { payload, digest } = buildAttestationPayload(fields);
     expect(digest).toBe(keccak256(payload));
   });
@@ -86,24 +128,30 @@ describe("buildAttestationPayload", () => {
   });
 
   it("produces a different digest for a different risk score", () => {
-    const a = buildAttestationPayload(fields);
-    const b = buildAttestationPayload({ ...fields, riskScore: 1_251 });
-    expect(a.digest).not.toBe(b.digest);
+    expect(buildAttestationPayload(fields).digest).not.toBe(
+      buildAttestationPayload({ ...fields, riskScore: 1_251 }).digest,
+    );
   });
 
-  it("length-prefixes agent_id so field boundaries cannot be forged", () => {
-    // Without the length prefix these two could collide by shifting bytes
-    // between agent_id and the nonce.
-    const a = buildAttestationPayload({ ...fields, agentId: "ab" });
-    const b = buildAttestationPayload({ ...fields, agentId: "abc" });
-    expect(a.payload).not.toBe(b.payload);
+  it("distinguishes ids that a numeric encoding would collapse together", () => {
+    // Different BytesN<32> values, same integer. Under a numeric encoding both
+    // would digest identically and an attestation for one invoice would verify
+    // against the other.
+    const a = buildAttestationPayload({
+      ...fields,
+      invoiceId: `0x${"00".repeat(31)}2a`,
+    });
+    const b = buildAttestationPayload({
+      ...fields,
+      invoiceId: `0x${"00".repeat(30)}2a00`,
+    });
     expect(a.digest).not.toBe(b.digest);
   });
 
   it("rejects a risk score outside the basis point range", () => {
-    expect(() => buildAttestationPayload({ ...fields, riskScore: 10_001 })).toThrow(
-      AttestationError,
-    );
+    expect(() =>
+      buildAttestationPayload({ ...fields, riskScore: 10_001 }),
+    ).toThrow(AttestationError);
     expect(() => buildAttestationPayload({ ...fields, riskScore: -1 })).toThrow(
       AttestationError,
     );
@@ -125,7 +173,6 @@ describe("buildAttestationPayload", () => {
   });
 
   it("rejects a decimal invoice id outright rather than coercing it", () => {
-    // The old numeric form. It must fail loudly, not silently re-encode.
     expect(() =>
       buildAttestationPayload({ ...fields, invoiceId: "42" as `0x${string}` }),
     ).toThrow(/0x-prefixed hex/);
@@ -135,6 +182,15 @@ describe("buildAttestationPayload", () => {
     expect(() =>
       buildAttestationPayload({ ...fields, agentId: "under-write" }),
     ).toThrow(/Symbol/);
+  });
+
+  it("rejects a nonce that does not fit in the contract's u64", () => {
+    expect(() =>
+      buildAttestationPayload({ ...fields, nonce: 1n << 64n }),
+    ).toThrow(/u64/);
+    expect(() => buildAttestationPayload({ ...fields, nonce: -1n })).toThrow(
+      /u64/,
+    );
   });
 
   it("rejects a mis-sized evidence hash", () => {
@@ -147,22 +203,20 @@ describe("buildAttestationPayload", () => {
 /**
  * Cross-implementation parity with the Soroban side.
  *
- * The contract rebuilds this preimage in Rust and hashes it with Soroban's
- * `keccak256`. Two things therefore have to hold, and asserting the TS output
- * against itself would prove neither:
+ * The contract calls `AttestationPayload::from_xdr(&payload)` and then
+ * `keccak256(&payload)`. Two things therefore have to hold:
  *
- * 1. `keccak256` here is genuine Keccak-256, not SHA3-256. The two differ only
- *    in padding and produce completely different digests for identical input,
- *    so the check is against published Keccak-256 vectors rather than against
- *    another viem call.
- * 2. The preimage bytes are what a Rust implementation reading the layout
- *    table would independently produce — built here with plain concatenation,
- *    not by calling the function under test.
+ * 1. `keccak256` here is genuine Keccak-256, not SHA3-256 — the two differ
+ *    only in padding and produce entirely different digests, so this is
+ *    checked against published vectors rather than against another viem call.
+ * 2. The bytes decode as the contract's struct. The decoding below uses
+ *    stellar-sdk's XDR reader, and the same bytes were additionally decoded
+ *    by the `stellar` CLI's independent Rust implementation during
+ *    development, which produced the six sorted symbol keys with types
+ *    symbol/bytes/bytes/bytes/u64/u32.
  */
 describe("Rust/Soroban parity", () => {
   it("uses Keccak-256, not SHA3-256", () => {
-    // Published Keccak-256 vectors. SHA3-256 of the same inputs differs
-    // entirely, so this pins the exact primitive Soroban implements.
     expect(keccak256(new Uint8Array())).toBe(
       "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
     );
@@ -171,42 +225,31 @@ describe("Rust/Soroban parity", () => {
     );
   });
 
-  it("digests a preimage assembled independently, byte for byte", () => {
-    // Built the way the contract would: fixed-width fields concatenated in
-    // order, invoice_id copied in raw.
-    const riskScore = Buffer.alloc(4);
-    riskScore.writeUInt32BE(fields.riskScore);
+  it("matches the XDR the stellar CLI decoded during verification", () => {
+    // Pinned from a run whose output was decoded by the `stellar xdr decode`
+    // Rust implementation into the correct AttestationPayload shape. If this
+    // changes, the wire format changed and the contract will reject it.
+    const pinned: AttestationFields = {
+      invoiceId: `0x${"7f".repeat(32)}`,
+      riskScore: 1_250,
+      evidenceHash: `0x${"ab".repeat(32)}`,
+      agentId: "underwrite_v1",
+      nonce: 42n,
+    };
+    const { payload, digest } = buildAttestationPayload(pinned);
 
-    const agentId = Buffer.from(fields.agentId, "ascii");
-
-    const expectedPreimage = Buffer.concat([
-      Buffer.from(DOMAIN_SEPARATOR, "ascii"),
-      Buffer.from(INVOICE_ID.slice(2), "hex"),
-      riskScore,
-      Buffer.from(fields.evidenceHash.slice(2), "hex"),
-      Buffer.from([agentId.length]),
-      agentId,
-      Buffer.from(fields.nonce.slice(2), "hex"),
-    ]);
-
-    const { payload, digest } = buildAttestationPayload(fields);
-
-    expect(Buffer.from(payload.slice(2), "hex").equals(expectedPreimage)).toBe(
-      true,
+    expect(Buffer.from(payload.slice(2), "hex").toString("base64")).toBe(
+      "AAAAEQAAAAEAAAAGAAAADwAAAAhhZ2VudF9pZAAAAA8AAAANdW5kZXJ3cml0ZV92MQAAAAAAAA8AAAAQZG9tYWluX3NlcGFyYXRvcgAAAA0AAAAgVHJ1c1Ryb3ZlLkludm9pY2VBdHRlc3RhdGlvbi52MV8AAAAPAAAADWV2aWRlbmNlX2hhc2gAAAAAAAANAAAAIKurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urAAAADwAAAAppbnZvaWNlX2lkAAAAAAANAAAAIH9/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/AAAADwAAAAVub25jZQAAAAAAAAUAAAAAAAAAKgAAAA8AAAAKcmlza19zY29yZQAAAAAAAwAABOI=",
     );
-    expect(digest).toBe(keccak256(expectedPreimage));
+    expect(digest).toBe(
+      "0x3acae65b18a83107fee0b83ce8bf9fd265da3cf84e178c861a6b7b3579e01624",
+    );
   });
 
-  it("holds the digest to a fixed value, so any encoding change is caught", () => {
-    // A regression pin. If this value changes, the wire format changed, and
-    // the Soroban side must change with it or signature recovery breaks.
-    const { digest } = buildAttestationPayload(fields);
-    expect(digest).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(digest).toBe(
-      keccak256(
-        Buffer.from(buildAttestationPayload(fields).payload.slice(2), "hex"),
-      ),
-    );
+  it("produces bytes that re-parse as a valid ScVal", () => {
+    // A malformed encoding would throw here, which is exactly what the
+    // contract's from_xdr would do before any signature is examined.
+    expect(() => decode(buildAttestationPayload(fields).payload)).not.toThrow();
   });
 });
 
@@ -221,11 +264,14 @@ describe("signAttestation", () => {
       hash: signed.digest,
       signature: signed.signature,
     });
-    const account = privateKeyToAccount(PRIVATE_KEY);
-    expect(recovered.toLowerCase()).toBe(account.publicKey.toLowerCase());
+    expect(recovered.toLowerCase()).toBe(
+      privateKeyToAccount(PRIVATE_KEY).publicKey.toLowerCase(),
+    );
   });
 
   it("packs the recovery id as 0 or 1, not 27 or 28", async () => {
+    // The contract does `sig_bytes[64] as u32` and hands that straight to
+    // secp256k1_recover, which rejects anything above 1.
     const signed = await signAttestation(fields, PRIVATE_KEY);
     const lastByte = Number.parseInt(signed.signature.slice(-2), 16);
     expect(lastByte).toBe(signed.recoveryId);
@@ -260,7 +306,7 @@ describe("canonicalize", () => {
 
 describe("hashEvidenceReport", () => {
   const report = {
-    invoiceId: "42",
+    invoiceId: INVOICE_ID,
     agentId: "underwrite_v1",
     riskScore: 1_250,
     generatedAt: "2026-01-06T00:00:00.000Z",
@@ -269,31 +315,39 @@ describe("hashEvidenceReport", () => {
   } as unknown as Parameters<typeof hashEvidenceReport>[0];
 
   it("ignores the evidenceHash field itself", () => {
-    const withoutField = hashEvidenceReport(report);
-    const withField = hashEvidenceReport({
-      ...report,
-      evidenceHash: `0x${"11".repeat(32)}`,
-    });
-    expect(withField).toBe(withoutField);
+    expect(
+      hashEvidenceReport({ ...report, evidenceHash: `0x${"11".repeat(32)}` }),
+    ).toBe(hashEvidenceReport(report));
   });
 
   it("changes when any other field changes", () => {
-    const a = hashEvidenceReport(report);
-    const b = hashEvidenceReport({ ...report, riskScore: 1_251 });
-    expect(a).not.toBe(b);
+    expect(hashEvidenceReport({ ...report, riskScore: 1_251 })).not.toBe(
+      hashEvidenceReport(report),
+    );
   });
 });
 
 describe("deriveNonce", () => {
+  it("returns a value inside the contract's u64 range", () => {
+    const nonce = deriveNonce("agent", INVOICE_ID, fields.evidenceHash);
+    expect(typeof nonce).toBe("bigint");
+    expect(nonce).toBeGreaterThanOrEqual(0n);
+    expect(nonce).toBeLessThan(1n << 64n);
+  });
+
   it("is stable for the same invoice and evidence", () => {
-    expect(deriveNonce("agent", "42", fields.evidenceHash)).toBe(
-      deriveNonce("agent", "42", fields.evidenceHash),
+    expect(deriveNonce("agent", INVOICE_ID, fields.evidenceHash)).toBe(
+      deriveNonce("agent", INVOICE_ID, fields.evidenceHash),
     );
   });
 
   it("differs across invoices and across evidence", () => {
-    const base = deriveNonce("agent", "42", fields.evidenceHash);
-    expect(deriveNonce("agent", "43", fields.evidenceHash)).not.toBe(base);
-    expect(deriveNonce("agent", "42", `0x${"ff".repeat(32)}`)).not.toBe(base);
+    const base = deriveNonce("agent", INVOICE_ID, fields.evidenceHash);
+    expect(deriveNonce("agent", `0x${"01".repeat(32)}`, fields.evidenceHash)).not.toBe(
+      base,
+    );
+    expect(deriveNonce("agent", INVOICE_ID, `0x${"ff".repeat(32)}`)).not.toBe(
+      base,
+    );
   });
 });

@@ -1,3 +1,4 @@
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { keccak256 } from "viem";
 import { sign } from "viem/accounts";
 import type { EvidenceReport } from "./types.js";
@@ -5,46 +6,53 @@ import type { EvidenceReport } from "./types.js";
 /**
  * Attestation payload construction and signing.
  *
- * The contract on the TrusTrove side has to rebuild these exact bytes to
- * recover the signer, so the encoding below is a wire format, not an
- * implementation detail. Every field is fixed-width or explicitly
- * length-prefixed: there is no place where two different sets of inputs can
- * serialise to the same byte string, which is what stops a crafted
- * `agent_id` from impersonating part of an `evidence_hash`.
+ * The `payload` argument of TrusTrove's `submit_attestation` is the XDR
+ * serialisation of its `AttestationPayload` struct — the contract calls
+ * `AttestationPayload::from_xdr(&env, &payload)` and then hashes those same
+ * bytes with `keccak256`. So this is not a format we get to choose: it has to
+ * be byte-identical to what `soroban_sdk`'s `to_xdr` produces on the Rust
+ * side, or `from_xdr` rejects it and no signature is ever checked.
  *
- * ```text
- * offset  size  field
- * 0       25    domain separator, ASCII "UNDERWRITE_ATTESTATION_V1"
- * 25      32    invoice_id,   raw BytesN<32>, copied verbatim
- * 57      4     risk_score,   u32 big-endian, basis points 0-10000
- * 61      32    evidence_hash, keccak256 of the canonical evidence report
- * 93      1     agent_id length, u8 (1-32)
- * 94      N     agent_id, ASCII, matching the Soroban Symbol charset
- * 94+N    32    nonce
+ * ```rust
+ * // contracts/invoice/src/types.rs
+ * pub struct AttestationPayload {
+ *     pub domain_separator: BytesN<32>,
+ *     pub invoice_id: BytesN<32>,
+ *     pub risk_score: u32,
+ *     pub evidence_hash: BytesN<32>,
+ *     pub agent_id: Symbol,
+ *     pub nonce: u64,
+ * }
  * ```
  *
- * `invoice_id` is a `BytesN<32>` on the TrusTrove side
- * (`list_for_financing(env, invoice_id: BytesN<32>, discount_bps: u32)`),
- * so it is copied in as raw bytes. It is deliberately never parsed as a
- * number: a numeric round-trip would drop leading zero bytes and normalise
- * distinct ids onto the same integer, so the contract would rebuild a
- * different preimage and signature recovery would fail.
+ * A `#[contracttype]` struct encodes as an `ScVal::Map` whose keys are the
+ * field names as `ScSymbol`, **sorted lexicographically** — not in
+ * declaration order. That ordering was confirmed against a live deployed
+ * contract rather than assumed: agent-registry's `get_agent` returns its
+ * `Agent { active, pubkey }` struct as an `ScMap` with `active` before
+ * `pubkey`. `BytesN<N>` encodes as `ScVal::Bytes`, also confirmed there.
  *
- * The signed digest is `keccak256` of that whole preimage. The preimage
- * itself is what goes on the wire as `payload`, so the contract can check
- * that the invoice id and risk score inside it match the ones it is storing,
- * rather than trusting a bare hash.
+ * The digest that gets signed is `keccak256(payload)` over those XDR bytes.
+ * Passing the whole payload rather than a bare hash is what lets the contract
+ * check that the `invoice_id` inside it matches the argument it was called
+ * with, so a signature cannot be lifted onto a different invoice.
  */
 
-export const DOMAIN_SEPARATOR = "UNDERWRITE_ATTESTATION_V1";
+/**
+ * The contract's fixed 32-byte domain separator, copied verbatim from
+ * `ATTESTATION_DOMAIN_SEPARATOR` in `contracts/invoice/src/lib.rs`. Exactly
+ * 32 ASCII bytes — the trailing underscore is padding to reach `BytesN<32>`,
+ * not a typo. `submit_attestation` rejects any payload whose separator
+ * differs, so this string is load-bearing.
+ */
+export const DOMAIN_SEPARATOR = "TrusTrove.InvoiceAttestation.v1_";
 
-const DOMAIN_BYTES = new TextEncoder().encode(DOMAIN_SEPARATOR);
 const INVOICE_ID_BYTES = 32;
-const U32_BYTES = 4;
 const HASH_BYTES = 32;
-const NONCE_BYTES = 32;
+const DOMAIN_SEPARATOR_BYTES = 32;
 const MAX_AGENT_ID_BYTES = 32;
 const MAX_RISK_SCORE = 10_000;
+const MAX_U64 = (1n << 64n) - 1n;
 
 export class AttestationError extends Error {
   constructor(message: string) {
@@ -62,8 +70,12 @@ export interface AttestationFields {
   evidenceHash: string;
   /** Soroban Symbol: 1-32 chars of [a-zA-Z0-9_]. */
   agentId: string;
-  /** 0x-prefixed 32-byte nonce. */
-  nonce: string;
+  /**
+   * The contract's `nonce` field is a `u64`, so this is a bigint, not bytes.
+   * It is not tracked on-chain — the one-attestation-per-invoice storage
+   * check is the actual replay guard.
+   */
+  nonce: bigint;
 }
 
 export interface SignedAttestation extends AttestationFields {
@@ -105,38 +117,26 @@ function bytesToHex(bytes: Uint8Array): `0x${string}` {
   return out as `0x${string}`;
 }
 
-/** Big-endian encoding of an unsigned integer into exactly `size` bytes. */
-function encodeUint(value: bigint, size: number, field: string): Uint8Array {
-  if (value < 0n) {
-    throw new AttestationError(`${field} must not be negative`);
-  }
-  const max = (1n << BigInt(size * 8)) - 1n;
-  if (value > max) {
-    throw new AttestationError(`${field} does not fit in ${size} bytes`);
-  }
-  const bytes = new Uint8Array(size);
-  let remaining = value;
-  for (let i = size - 1; i >= 0; i--) {
-    bytes[i] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
-  return bytes;
-}
-
-function encodeAgentId(agentId: string): Uint8Array {
+function assertAgentId(agentId: string): string {
   if (!/^[a-zA-Z0-9_]{1,32}$/.test(agentId)) {
     throw new AttestationError(
       `agentId "${agentId}" is not a valid Soroban Symbol (1-32 chars of [a-zA-Z0-9_])`,
     );
   }
-  const bytes = new TextEncoder().encode(agentId);
-  if (bytes.length > MAX_AGENT_ID_BYTES) {
+  if (new TextEncoder().encode(agentId).length > MAX_AGENT_ID_BYTES) {
     throw new AttestationError("agentId exceeds 32 bytes");
   }
-  return bytes;
+  return agentId;
 }
 
-/** Builds the attestation preimage. Pure, and the inverse of the table above. */
+/**
+ * Builds the XDR-encoded `AttestationPayload` and the digest over it.
+ *
+ * The map entries are sorted by key before encoding. `soroban_sdk` emits
+ * struct fields in lexicographic name order and its decoder depends on that
+ * order, so building the entries in the struct's *declaration* order would
+ * produce bytes that `from_xdr` rejects.
+ */
 export function buildAttestationPayload(fields: AttestationFields): {
   payload: `0x${string}`;
   digest: `0x${string}`;
@@ -145,6 +145,11 @@ export function buildAttestationPayload(fields: AttestationFields): {
     fields.invoiceId,
     INVOICE_ID_BYTES,
     "invoiceId",
+  );
+  const evidenceHashBytes = hexToBytes(
+    fields.evidenceHash,
+    HASH_BYTES,
+    "evidenceHash",
   );
 
   if (!Number.isInteger(fields.riskScore)) {
@@ -158,25 +163,46 @@ export function buildAttestationPayload(fields: AttestationFields): {
     );
   }
 
-  const agentIdBytes = encodeAgentId(fields.agentId);
-  const parts = [
-    DOMAIN_BYTES,
-    invoiceIdBytes,
-    encodeUint(BigInt(fields.riskScore), U32_BYTES, "riskScore"),
-    hexToBytes(fields.evidenceHash, HASH_BYTES, "evidenceHash"),
-    Uint8Array.of(agentIdBytes.length),
-    agentIdBytes,
-    hexToBytes(fields.nonce, NONCE_BYTES, "nonce"),
-  ];
-
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const preimage = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    preimage.set(part, offset);
-    offset += part.length;
+  if (fields.nonce < 0n || fields.nonce > MAX_U64) {
+    throw new AttestationError(
+      `nonce ${fields.nonce} does not fit in the contract's u64`,
+    );
   }
 
+  const domainSeparator = new TextEncoder().encode(DOMAIN_SEPARATOR);
+  if (domainSeparator.length !== DOMAIN_SEPARATOR_BYTES) {
+    // Guards against an edit to the constant silently producing payloads the
+    // contract will reject for a reason that is hard to see from the outside.
+    throw new AttestationError(
+      `domain separator must be exactly ${DOMAIN_SEPARATOR_BYTES} bytes, got ${domainSeparator.length}`,
+    );
+  }
+
+  const entries: Array<[string, xdr.ScVal]> = [
+    ["domain_separator", xdr.ScVal.scvBytes(Buffer.from(domainSeparator))],
+    ["invoice_id", xdr.ScVal.scvBytes(Buffer.from(invoiceIdBytes))],
+    ["risk_score", nativeToScVal(fields.riskScore, { type: "u32" })],
+    ["evidence_hash", xdr.ScVal.scvBytes(Buffer.from(evidenceHashBytes))],
+    [
+      "agent_id",
+      nativeToScVal(assertAgentId(fields.agentId), { type: "symbol" }),
+    ],
+    ["nonce", nativeToScVal(fields.nonce, { type: "u64" })],
+  ];
+
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+  const scval = xdr.ScVal.scvMap(
+    entries.map(
+      ([key, val]) =>
+        new xdr.ScMapEntry({
+          key: nativeToScVal(key, { type: "symbol" }),
+          val,
+        }),
+    ),
+  );
+
+  const preimage = new Uint8Array(scval.toXDR());
   const payload = bytesToHex(preimage);
   return { payload, digest: keccak256(preimage) };
 }
@@ -196,11 +222,17 @@ export function deriveNonce(
   agentId: string,
   invoiceId: string,
   evidenceHash: string,
-): `0x${string}` {
+): bigint {
   const encoder = new TextEncoder();
-  return keccak256(
+  const digest = keccak256(
     encoder.encode(`${DOMAIN_SEPARATOR}|${agentId}|${invoiceId}|${evidenceHash}`),
   );
+  // The contract's nonce is a u64, so the 32-byte digest is truncated to its
+  // leading 8 bytes. Collision resistance is not what the nonce is for here —
+  // replay is prevented by the contract's one-attestation-per-invoice storage
+  // check — so 64 bits of a keccak digest is ample for making the value
+  // unpredictable and deterministic.
+  return BigInt(`0x${digest.slice(2, 18)}`);
 }
 
 /**

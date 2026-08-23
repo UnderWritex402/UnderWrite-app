@@ -32,7 +32,7 @@ const signed: SignedAttestation = {
   riskScore: 1_250,
   evidenceHash: `0x${"ab".repeat(32)}`,
   agentId: "underwrite_v1",
-  nonce: `0x${"cd".repeat(32)}`,
+  nonce: 42n,
   payload: `0x${"11".repeat(120)}`,
   digest: `0x${"22".repeat(32)}`,
   signature: `0x${"33".repeat(65)}`,
