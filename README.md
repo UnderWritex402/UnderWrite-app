@@ -36,11 +36,7 @@ The implemented pipeline reads TrusTrove platform history, checks Nigerian CAC r
 
 | Name | Role | GitHub | Telegram |
 | --- | --- | --- | --- |
-| `{{NAME}}` | Maintainer | `{{GITHUB}}` | `{{TELEGRAM}}` |
-
-Community: `{{COMMUNITY_LINK}}`
-
-Demo video: `{{DEMO_VIDEO_URL}}`
+| Fuhad Adesanya | Maintainer | [@K1NGD4VID](https://github.com/K1NGD4VID), [@fadesany](https://github.com/fadesany) | [@K1NGD4VID](https://t.me/K1NGD4VID) |
 
 ## Quick Start
 
