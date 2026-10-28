@@ -111,3 +111,16 @@ The digest is `keccak256(payload)`. The agent signs it with secp256k1 and sends 
 Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Audit status: unaudited.
 
 No `LICENSE` file is present. The repository owner must select a license before contributors can rely on reuse terms.
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md), then:
+
+1. Pick an unassigned issue with no unmet dependency.
+2. Create a branch such as `feat/123-short-name` from `main`.
+3. Use Conventional Commits, for example `test(attestation): cover invalid payloads`.
+4. Open a pull request that links the issue, includes tests, updates docs, and passes CI.
+
+## Contributors
+
+[![Contributors](https://contrib.rocks/image?repo=UnderWritex402/UnderWrite-app)](https://github.com/UnderWritex402/UnderWrite-app/graphs/contributors)
