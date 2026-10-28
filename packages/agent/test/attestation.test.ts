@@ -148,6 +148,21 @@ describe("buildAttestationPayload", () => {
     expect(a.digest).not.toBe(b.digest);
   });
 
+  it("changes the digest when any single invoice id byte changes", () => {
+    const baseBytes = Buffer.from(INVOICE_ID.slice(2), "hex");
+    const baseDigest = buildAttestationPayload(fields).digest;
+
+    for (let index = 0; index < baseBytes.length; index++) {
+      const changed = Buffer.from(baseBytes);
+      changed[index] ^= 0xff;
+      const invoiceId = `0x${changed.toString("hex")}` as const;
+
+      expect(buildAttestationPayload({ ...fields, invoiceId }).digest).not.toBe(
+        baseDigest,
+      );
+    }
+  });
+
   it("rejects a risk score outside the basis point range", () => {
     expect(() =>
       buildAttestationPayload({ ...fields, riskScore: 10_001 }),
@@ -164,6 +179,9 @@ describe("buildAttestationPayload", () => {
   });
 
   it("rejects an invoice id that is not exactly 32 bytes", () => {
+    expect(() =>
+      buildAttestationPayload({ ...fields, invoiceId: "0x" }),
+    ).toThrow(/32 bytes/);
     expect(() =>
       buildAttestationPayload({ ...fields, invoiceId: `0x${"ab".repeat(31)}` }),
     ).toThrow(/32 bytes/);
