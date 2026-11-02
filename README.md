@@ -52,9 +52,18 @@ npm test
 npm run build
 ```
 
-The current suite has 122 tests across 11 files. The commands above were checked from a fresh clone.
+The current suite has 125 tests across 12 files. The commands above were checked from a fresh clone.
 
-The package currently exposes a TypeScript library. It does not include a runnable HTTP server or CLI entrypoint.
+The package exposes a TypeScript library and an operator CLI. Build first, then pass a JSON request file and either a settled merchant order or the explicit testnet-only payment bypass:
+
+```bash
+npm run start -- --request ./request.json --order-id ord_123 --submit
+npm run start -- --request ./request.json --skip-payment
+```
+
+`--submit` sends a successful signed attestation to the configured Invoice contract. Without it, the CLI verifies and signs but does not send a transaction. `--skip-payment` is only for a controlled testnet operator run; normal operation requires `--order-id` and confirms settlement before research begins.
+
+The request file contains `invoiceId`, `documentPath`, `amountMinor` as an integer string, `currency`, `invoiceDate`, `dueDate`, and `buyer` and `seller` objects with `address`, `name`, and nullable `rcNumber` fields. The document path is resolved relative to the request file.
 
 ## Environment variables
 

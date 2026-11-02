@@ -1,6 +1,44 @@
 # CLI / Service Reference
 
-The current repository is a TypeScript library. It does not contain an HTTP server, webhook route, or general verification CLI.
+The repository contains a TypeScript library and an operator CLI. It does not contain an HTTP server or webhook route.
+
+## Operator CLI
+
+Build the package, then run:
+
+```bash
+npm run build
+npm run start -- --request ./request.json --order-id ord_123 --submit
+```
+
+Use `--skip-payment` only for a controlled testnet run. It must be explicit and cannot be combined with `--order-id`. Omitting `--submit` runs verification and stores the evidence report without sending a Soroban transaction.
+
+The CLI exits with code `0` after a signed result, `2` when required evidence is unavailable, and `1` for invalid input, configuration, payment, or submission errors. Its output contains identifiers, hashes, scores, and transaction metadata. It never prints configured secrets.
+
+The request JSON shape is:
+
+```json
+{
+  "invoiceId": "64 hexadecimal characters",
+  "documentPath": "./invoice.pdf",
+  "amountMinor": "5000000000",
+  "currency": "NGN",
+  "invoiceDate": "2026-11-02",
+  "dueDate": "2026-12-02",
+  "buyer": {
+    "address": "G...",
+    "name": "Buyer legal name",
+    "rcNumber": "RC100"
+  },
+  "seller": {
+    "address": "G...",
+    "name": "Seller legal name",
+    "rcNumber": "RC200"
+  }
+}
+```
+
+`documentPath` is resolved relative to the request JSON file. `invoiceId` may include a `0x` prefix. `amountMinor` is a string so large integer values do not lose precision in JSON.
 
 ## Workspace commands
 
@@ -50,7 +88,3 @@ import {
 ```
 
 Callers must supply the request data, validated subsystem configuration, search provider, evidence store, and key material. The repository does not wire these functions into a long-running process.
-
-## Known broken entry
-
-`packages/agent/package.json` defines `npm start` as `node dist/server.js`, but no `server.ts` exists and the build does not produce `dist/server.js`. Treat this script as a stub until a service entrypoint is implemented.
