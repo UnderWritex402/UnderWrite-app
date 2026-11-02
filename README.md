@@ -8,6 +8,8 @@
 
 Underwrite is an invoice verification layer for Stellar. A verification agent checks an invoice, signs a risk signal, and posts it to a Soroban registry. TrusTrove lists an invoice for financing only if a valid attestation exists. This repository contains the off-chain verification pipeline, scoring code, evidence storage, signing code, and Soroban submission client.
 
+[Live service](https://underwrite-app-theta.vercel.app/) · [Documentation](https://chusdrter.gitbook.io/underwrite/) · [Health endpoint](https://underwrite-app-theta.vercel.app/health)
+
 Testnet only. Unaudited. No mainnet deployment exists. End-to-end flow: in progress.
 
 ## How the repositories fit together
