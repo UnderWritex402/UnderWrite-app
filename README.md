@@ -54,15 +54,15 @@ npm test
 npm run build
 ```
 
-The current suite has 129 tests across 13 files. The commands above were checked from a fresh clone.
+The current suite has 131 tests across 13 files. The commands above were checked from a fresh clone.
 
-The package exposes a TypeScript library, a flag-based CLI for automation, and an interactive operator TUI. Build first, then launch the TUI:
+The package exposes a TypeScript library, a flag-based CLI for automation, and **Xwrite**, the interactive operator TUI. Build first, then launch it:
 
 ```bash
 npm run tui
 ```
 
-Use the arrow keys or `j`/`k` to navigate. The guided workflow checks the request path, payment mode, and submission mode before execution. A non-submitting run requires typing `RUN`; an on-chain testnet submission requires typing `SUBMIT`.
+Xwrite uses a command prompt inspired by modern agent CLIs. Start with `/verify`, inspect configuration with `/status`, or list commands with `/help`. The verification workflow uses the arrow keys or `j`/`k` for constrained choices and checks the request path, payment mode, and submission mode before execution. A non-submitting run requires typing `RUN`; an on-chain testnet submission requires typing `SUBMIT`.
 
 For automation, pass a JSON request file and either a settled merchant order or the explicit testnet-only payment bypass:
 

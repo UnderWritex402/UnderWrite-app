@@ -1,6 +1,6 @@
 # CLI / Service Reference
 
-The repository contains a TypeScript library, an automation-friendly operator CLI, and an interactive operator TUI. The hosted HTTP surface is a status and discovery endpoint; it does not accept invoice verification requests or webhooks.
+The repository contains a TypeScript library, an automation-friendly operator CLI, and **Xwrite**, the interactive operator TUI. The hosted HTTP surface is a status and discovery endpoint; it does not accept invoice verification requests or webhooks.
 
 ## Operator TUI
 
@@ -11,7 +11,17 @@ npm run build
 npm run tui
 ```
 
-The TUI requires an interactive terminal. Use the arrow keys or `j`/`k` to move, Enter to select, and `q` to cancel or exit. It provides:
+Xwrite requires an interactive terminal. Its main prompt supports:
+
+| Command | Action |
+| --- | --- |
+| `/verify` | Start the guided invoice verification workflow. |
+| `/status` | Check provider, payment, signer, and submission readiness without displaying values. |
+| `/help` or `/?` | Show commands and safety boundaries. |
+| `/clear` | Clear and redraw the session. |
+| `/quit` or `/exit` | Exit Xwrite. |
+
+Within a verification dialog, use the arrow keys or `j`/`k` to move, Enter to select, and `q` to cancel. Xwrite provides:
 
 - a guided verification workflow;
 - settled-order and controlled testnet payment modes;
