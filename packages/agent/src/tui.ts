@@ -1,5 +1,5 @@
 import { access } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -28,24 +28,14 @@ interface MenuItem<T extends string> {
   description: string;
 }
 
-const mainMenu: MenuItem<"run" | "config" | "help" | "quit">[] = [
-  {
-    value: "run",
-    label: "Run verification",
-    description: "Load an invoice request, verify evidence, and optionally submit.",
-  },
-  {
-    value: "config",
-    label: "Configuration status",
-    description: "Check required environment variables without showing their values.",
-  },
-  {
-    value: "help",
-    label: "Operator help",
-    description: "Review controls, exit codes, and safety boundaries.",
-  },
-  { value: "quit", label: "Quit", description: "Leave the operator console." },
-];
+export type TuiCommand =
+  | "verify"
+  | "status"
+  | "help"
+  | "clear"
+  | "quit"
+  | "empty"
+  | "unknown";
 
 const paymentMenu: MenuItem<"order" | "skip" | "back">[] = [
   {
@@ -58,7 +48,7 @@ const paymentMenu: MenuItem<"order" | "skip" | "back">[] = [
     label: "Controlled testnet bypass",
     description: "Skip payment explicitly for an operator-controlled testnet run.",
   },
-  { value: "back", label: "Back", description: "Return to the main menu." },
+  { value: "back", label: "Back", description: "Return to the Xwrite prompt." },
 ];
 
 const submissionMenu: MenuItem<"no" | "yes" | "back">[] = [
@@ -72,7 +62,7 @@ const submissionMenu: MenuItem<"no" | "yes" | "back">[] = [
     label: "Submit on Stellar testnet",
     description: "Send a successful attestation to the configured Invoice contract.",
   },
-  { value: "back", label: "Back", description: "Return to the main menu." },
+  { value: "back", label: "Back", description: "Return to the Xwrite prompt." },
 ];
 
 const ansi = {
@@ -81,10 +71,21 @@ const ansi = {
   bold: "\u001b[1m",
   dim: "\u001b[2m",
   cyan: "\u001b[36m",
+  blue: "\u001b[34m",
+  magenta: "\u001b[35m",
   green: "\u001b[32m",
   red: "\u001b[31m",
   yellow: "\u001b[33m",
 };
+
+const wordmark = [
+  "██╗  ██╗██╗    ██╗██████╗ ██╗████████╗███████╗",
+  "╚██╗██╔╝██║    ██║██╔══██╗██║╚══██╔══╝██╔════╝",
+  " ╚███╔╝ ██║ █╗ ██║██████╔╝██║   ██║   █████╗  ",
+  " ██╔██╗ ██║███╗██║██╔══██╗██║   ██║   ██╔══╝  ",
+  "██╔╝ ██╗╚███╔███╔╝██║  ██║██║   ██║   ███████╗",
+  "╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝",
+];
 
 function style(code: string, text: string): string {
   return process.stdout.isTTY ? `${code}${text}${ansi.reset}` : text;
@@ -92,12 +93,62 @@ function style(code: string, text: string): string {
 
 function header(subtitle: string): string {
   return [
-    style(ansi.cyan + ansi.bold, "UNDERWRITE // OPERATOR CONSOLE"),
-    style(ansi.dim, "Stellar testnet · verification agent v0.1.0"),
+    style(ansi.cyan + ansi.bold, "XWRITE"),
+    style(ansi.dim, "UnderWrite operator agent · Stellar testnet · v0.1.0"),
     "",
     style(ansi.bold, subtitle),
     "",
   ].join("\n");
+}
+
+export function parseTuiCommand(input: string): TuiCommand {
+  const command = input.trim().toLowerCase().split(/\s+/, 1)[0];
+  if (command === "") return "empty";
+  if (command === "/verify" || command === "verify") return "verify";
+  if (command === "/status" || command === "status") return "status";
+  if (command === "/help" || command === "/?" || command === "help") {
+    return "help";
+  }
+  if (command === "/clear" || command === "clear") return "clear";
+  if (
+    command === "/quit" ||
+    command === "/exit" ||
+    command === "quit" ||
+    command === "exit"
+  ) {
+    return "quit";
+  }
+  return "unknown";
+}
+
+export function renderWelcome(
+  projectName = basename(process.env.INIT_CWD ?? process.cwd()),
+): string {
+  const colors = [
+    ansi.cyan,
+    ansi.cyan,
+    ansi.blue,
+    ansi.blue,
+    ansi.magenta,
+    ansi.magenta,
+  ];
+  const logo = wordmark
+    .map((line, index) => style(colors[index]! + ansi.bold, line))
+    .join("\n");
+  const tips = [
+    style(ansi.bold, "Xwrite — UnderWrite verification agent"),
+    "",
+    style(ansi.dim, "Tips for getting started:"),
+    `1. Type ${style(ansi.cyan, "/verify")} to inspect and verify an invoice.`,
+    `2. Type ${style(ansi.cyan, "/status")} to check provider and signer readiness.`,
+    `3. Type ${style(ansi.cyan, "/help")} to see commands and safety boundaries.`,
+    "",
+    style(
+      ansi.dim,
+      `${projectName}  ·  stellar-testnet  ·  operator mode  ·  v0.1.0`,
+    ),
+  ].join("\n");
+  return `${ansi.clear}${logo}\n\n${tips}\n\n`;
 }
 
 export function nextMenuIndex(
@@ -242,7 +293,7 @@ async function ask(question: string): Promise<string> {
 }
 
 async function pause(): Promise<void> {
-  await ask(`\n${style(ansi.dim, "Press Enter to return to the main menu.")}`);
+  await ask(`\n${style(ansi.dim, "Press Enter to return to Xwrite.")}`);
 }
 
 async function requestPathPrompt(): Promise<string | null> {
@@ -334,8 +385,13 @@ async function showConfiguration(): Promise<void> {
 
 async function showHelp(): Promise<void> {
   const text = [
-    "Use ↑/↓ or j/k to move and Enter to select.",
+    `${style(ansi.cyan, "/verify")}   Start the guided invoice verification workflow.`,
+    `${style(ansi.cyan, "/status")}   Check configuration without displaying values.`,
+    `${style(ansi.cyan, "/clear")}    Clear and redraw the Xwrite session.`,
+    `${style(ansi.cyan, "/help")}     Show this command reference.`,
+    `${style(ansi.cyan, "/quit")}     Exit Xwrite.`,
     "",
+    "Inside selection dialogs, use ↑/↓ or j/k and Enter.",
     "Verify and sign only stores the evidence report without a Stellar write.",
     "Submit on Stellar testnet sends a successful attestation on-chain.",
     "The payment bypass is only for a controlled testnet operator run.",
@@ -352,12 +408,20 @@ export async function runTui(): Promise<number> {
     throw new Error("the UnderWrite TUI requires an interactive terminal");
   }
 
+  process.stdout.write(renderWelcome());
   while (true) {
-    const choice = await selectMenu("Main menu", mainMenu);
-    if (choice === "__quit" || choice === "quit") return 0;
-    if (choice === "run") await runWizard();
-    if (choice === "config") await showConfiguration();
-    if (choice === "help") await showHelp();
+    const input = await ask(`${style(ansi.cyan + ansi.bold, "❯")} `);
+    const command = parseTuiCommand(input);
+    if (command === "quit") return 0;
+    if (command === "verify") await runWizard();
+    if (command === "status") await showConfiguration();
+    if (command === "help") await showHelp();
+    if (command === "clear") process.stdout.write(renderWelcome());
+    if (command === "unknown") {
+      process.stdout.write(
+        `${style(ansi.yellow, `Unknown command: ${input}`)}\n${style(ansi.dim, "Type /help to see available commands.")}\n\n`,
+      );
+    }
   }
 }
 
@@ -370,7 +434,7 @@ if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
     .catch((error: unknown) => {
       process.stdin.isTTY && process.stdin.setRawMode(false);
       const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`underwrite-tui: ${message}\n`);
+      process.stderr.write(`xwrite: ${message}\n`);
       process.exitCode = 1;
     });
 }

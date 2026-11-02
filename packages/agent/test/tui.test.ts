@@ -3,7 +3,27 @@ import {
   buildCliArgs,
   configurationGroups,
   nextMenuIndex,
+  parseTuiCommand,
+  renderWelcome,
 } from "../src/tui.js";
+
+describe("Xwrite command surface", () => {
+  it("parses Gemini-style slash commands and aliases", () => {
+    expect(parseTuiCommand("/verify")).toBe("verify");
+    expect(parseTuiCommand("status")).toBe("status");
+    expect(parseTuiCommand("/?")).toBe("help");
+    expect(parseTuiCommand("/exit")).toBe("quit");
+    expect(parseTuiCommand("/unknown")).toBe("unknown");
+  });
+
+  it("renders the Xwrite wordmark, hints, and context footer", () => {
+    const welcome = renderWelcome("UnderWrite-app");
+    expect(welcome).toContain("██╗  ██╗");
+    expect(welcome).toContain("Xwrite — UnderWrite verification agent");
+    expect(welcome).toContain("/verify");
+    expect(welcome).toContain("UnderWrite-app  ·  stellar-testnet");
+  });
+});
 
 describe("nextMenuIndex", () => {
   it("wraps in both directions", () => {
