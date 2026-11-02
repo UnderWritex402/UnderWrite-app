@@ -13,7 +13,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node --env-file=../../.env dist/cli.js"
+    "start": "node --env-file=../../.env dist/cli.js",
+    "tui": "node --env-file=../../.env dist/tui.js"
   },
   "dependencies": {
     "@goatnetwork/agentkit": "^0.2.3",
