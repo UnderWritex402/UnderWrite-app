@@ -1,6 +1,6 @@
 # How to Contribute
 
-Read the repository's [CONTRIBUTING.md](../../CONTRIBUTING.md) before starting.
+Read the repository's [CONTRIBUTING.md](https://github.com/UnderWritex402/UnderWrite-app/blob/main/CONTRIBUTING.md) before starting.
 
 ## Pick work
 
@@ -57,4 +57,4 @@ Behavior changes need tests. Environment changes need updates to `.env.example`,
 
 ## Security reports
 
-Do not open a public issue for a vulnerability. Follow [SECURITY.md](../../SECURITY.md). GitHub private vulnerability reporting still needs to be enabled by the repository owner before that channel is usable.
+Do not open a public issue for a vulnerability. Follow the repository's [security policy](https://github.com/UnderWritex402/UnderWrite-app/security/policy) and use GitHub private vulnerability reporting.
