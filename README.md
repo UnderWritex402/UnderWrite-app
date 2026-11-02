@@ -54,9 +54,17 @@ npm test
 npm run build
 ```
 
-The current suite has 125 tests across 12 files. The commands above were checked from a fresh clone.
+The current suite has 129 tests across 13 files. The commands above were checked from a fresh clone.
 
-The package exposes a TypeScript library and an operator CLI. Build first, then pass a JSON request file and either a settled merchant order or the explicit testnet-only payment bypass:
+The package exposes a TypeScript library, a flag-based CLI for automation, and an interactive operator TUI. Build first, then launch the TUI:
+
+```bash
+npm run tui
+```
+
+Use the arrow keys or `j`/`k` to navigate. The guided workflow checks the request path, payment mode, and submission mode before execution. A non-submitting run requires typing `RUN`; an on-chain testnet submission requires typing `SUBMIT`.
+
+For automation, pass a JSON request file and either a settled merchant order or the explicit testnet-only payment bypass:
 
 ```bash
 npm run start -- --request ./request.json --order-id ord_123 --submit

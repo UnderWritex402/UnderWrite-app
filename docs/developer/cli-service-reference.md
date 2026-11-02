@@ -1,6 +1,27 @@
 # CLI / Service Reference
 
-The repository contains a TypeScript library and an operator CLI. It does not contain an HTTP server or webhook route.
+The repository contains a TypeScript library, an automation-friendly operator CLI, and an interactive operator TUI. The hosted HTTP surface is a status and discovery endpoint; it does not accept invoice verification requests or webhooks.
+
+## Operator TUI
+
+Build the package, then launch the interactive console:
+
+```bash
+npm run build
+npm run tui
+```
+
+The TUI requires an interactive terminal. Use the arrow keys or `j`/`k` to move, Enter to select, and `q` to cancel or exit. It provides:
+
+- a guided verification workflow;
+- settled-order and controlled testnet payment modes;
+- verify-and-sign or Stellar testnet submission modes;
+- configuration readiness checks that show only variable names and configured/missing status;
+- explicit confirmation before execution.
+
+A verify-and-sign run requires typing `RUN`. A run that can send a Stellar transaction requires typing `SUBMIT`. Canceling the confirmation returns to the main menu without running verification.
+
+The TUI calls the same verification path as the flag-based CLI below. It does not display private keys, Stellar seeds, merchant passwords, or API token values.
 
 ## Operator CLI
 
