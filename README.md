@@ -1,6 +1,7 @@
 # Underwrite Verification Agent
 
 [![CI](https://github.com/UnderWritex402/UnderWrite-app/actions/workflows/ci.yml/badge.svg)](https://github.com/UnderWritex402/UnderWrite-app/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 ![Network: Stellar testnet](https://img.shields.io/badge/network-Stellar%20testnet-7B61FF)
 ![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
@@ -106,7 +107,7 @@ The digest is `keccak256(payload)`. The agent signs it with secp256k1 and sends 
 
 Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Audit status: unaudited.
 
-No `LICENSE` file is present. The repository owner must select a license before contributors can rely on reuse terms.
+Licensed under the [Apache License 2.0](LICENSE).
 
 ## Contributing
 
