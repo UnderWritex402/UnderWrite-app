@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_DOCUMENT_BYTES,
   analyzeDocument,
   parsePdfDate,
 } from "../src/sources/documentForensics.js";
@@ -153,5 +154,45 @@ describe("analyzeDocument", () => {
     if (a.status !== "ok" || b.status !== "ok") throw new Error("expected ok");
     expect(a.result.documentHash).toBe(b.result.documentHash);
     expect(a.result.documentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("rejects documents exceeding maxDocumentBytes before full decoding", () => {
+    const doc = pdf({});
+    const oversized = analyzeDocument(request(doc), {
+      maxDocumentBytes: doc.length - 1,
+    });
+    expect(oversized.status).toBe("unavailable");
+    if (oversized.status !== "unavailable") return;
+    expect(oversized.reason).toContain("exceeds maximum allowed");
+
+    const exactBoundary = analyzeDocument(request(doc), {
+      maxDocumentBytes: doc.length,
+    });
+    expect(exactBoundary.status).toBe("ok");
+    expect(MAX_DOCUMENT_BYTES).toBe(10 * 1024 * 1024);
+  });
+
+  it("handles truncated and binary-heavy PDFs with bounded memory and runtime", () => {
+    const header = Buffer.from(
+      "%PDF-1.7\n1 0 obj << /Producer (UnclosedProducerValue",
+      "latin1",
+    );
+    const binaryBody = Buffer.alloc(256 * 1024, 0xff);
+    const trailer = Buffer.from(
+      ")\n/Producer (Acme Accounting 4.1) /CreationDate (D:20260105093000Z) >>\n",
+      "latin1",
+    );
+    // Deliberately truncated without %%EOF
+    const truncatedBinaryPdf = Buffer.concat([header, binaryBody, trailer]);
+
+    const started = Date.now();
+    const result = analyzeDocument(request(truncatedBinaryPdf));
+    const elapsedMs = Date.now() - started;
+
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.result.metadata.eofMarkers).toBe(0);
+    expect(result.result.metadata.producer).toBe("Acme Accounting 4.1");
+    expect(elapsedMs).toBeLessThan(500);
   });
 });

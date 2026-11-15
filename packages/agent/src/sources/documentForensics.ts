@@ -22,6 +22,20 @@ import type {
  */
 
 /**
+ * Default maximum document size (10 MiB) accepted by document forensics.
+ * Documents larger than this limit are rejected before any string decoding.
+ */
+export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+
+/** Maximum length of a single PDF literal info value inspected by `infoValues`. */
+const MAX_INFO_VALUE_LENGTH = 512;
+
+export interface DocumentForensicsOptions {
+  /** Maximum allowed byte length of `request.document` (default: 10 MiB). */
+  maxDocumentBytes?: number | undefined;
+}
+
+/**
  * Producers associated with editing an existing document rather than
  * generating one from an accounting system. Their presence on an invoice is
  * not damning - plenty of legitimate invoices are scanned - but it is worth
@@ -53,24 +67,59 @@ const FILE_SIGNATURES: ReadonlyArray<{ type: string; bytes: number[] }> = [
   { type: "tiff", bytes: [0x49, 0x49, 0x2a, 0x00] },
 ];
 
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // "%PDF-"
+const EOF_TOKEN = Buffer.from("%%EOF", "latin1");
+
+function startsWithPdfMagic(bytes: Uint8Array): boolean {
+  if (bytes.length < PDF_MAGIC.length) return false;
+  for (let i = 0; i < PDF_MAGIC.length; i += 1) {
+    if (bytes[i] !== PDF_MAGIC[i]) return false;
+  }
+  return true;
+}
+
+function countTokenBytes(buf: Buffer, token: Buffer): number {
+  let count = 0;
+  let offset = 0;
+  while (offset <= buf.length - token.length) {
+    const found = buf.indexOf(token, offset);
+    if (found === -1) break;
+    count += 1;
+    offset = found + token.length;
+  }
+  return count;
+}
+
 export function analyzeDocument(
   request: VerificationRequest,
+  options: DocumentForensicsOptions = {},
 ): SourceResult<DocumentForensicsResult> {
   try {
+    const maxDocumentBytes = options.maxDocumentBytes ?? MAX_DOCUMENT_BYTES;
+    if (!Number.isFinite(maxDocumentBytes) || maxDocumentBytes < 1) {
+      return unavailable(
+        "document forensics failed: maxDocumentBytes must be >= 1",
+      );
+    }
+
     const bytes = request.document;
     if (bytes.length === 0) {
       return unavailable("invoice document is empty");
     }
 
-    const documentHash = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length > maxDocumentBytes) {
+      return unavailable(
+        `invoice document size (${bytes.length} bytes) exceeds maximum allowed (${maxDocumentBytes} bytes)`,
+      );
+    }
 
-    // PDF is byte-oriented and mostly ASCII in its structural parts. Latin-1
-    // preserves byte values one-to-one, so offsets found here are real offsets.
-    const text = Buffer.from(bytes).toString("latin1");
+    const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const documentHash = createHash("sha256").update(buf).digest("hex");
 
-    if (!text.startsWith("%PDF-")) {
+    if (!startsWithPdfMagic(bytes)) {
       // A non-PDF document is not a failure of the source - the source ran, and
       // its answer is "this is not a PDF, so PDF checks say nothing about it".
+      // Checked on raw header bytes before allocating any decoded text string.
       return ok({
         fileType: detectFileType(bytes),
         documentHash,
@@ -86,8 +135,8 @@ export function analyzeDocument(
       });
     }
 
-    const metadata = extractMetadata(text);
-    const signals = collectSignals(text, metadata, request);
+    const metadata = extractMetadataFromBuffer(buf);
+    const signals = collectSignalsFromBuffer(buf, metadata, request);
 
     return ok({ fileType: "pdf", documentHash, signals, metadata });
   } catch (error) {
@@ -117,16 +166,62 @@ function detectFileType(bytes: Uint8Array): string {
   return "unknown";
 }
 
-/** All values for a given PDF info key, in document order. */
-function infoValues(text: string, key: string): string[] {
-  const pattern = new RegExp(`/${key}\\s*\\(([^)]*)\\)`, "g");
+/**
+ * Scans `buf` for `/Key (...)` entries using bounded index searches rather than
+ * converting the entire PDF buffer into one large Latin-1 string.
+ */
+function infoValuesFromBuffer(buf: Buffer, key: string): string[] {
+  const token = Buffer.from(`/${key}`, "latin1");
   const values: string[] = [];
-  for (const match of text.matchAll(pattern)) {
-    const value = match[1];
-    if (value !== undefined && value.trim() !== "") {
-      values.push(decodePdfString(value.trim()));
+  let offset = 0;
+
+  while (offset <= buf.length - token.length) {
+    const found = buf.indexOf(token, offset);
+    if (found === -1) break;
+
+    let cursor = found + token.length;
+    while (cursor < buf.length) {
+      const ch = buf[cursor];
+      if (ch === 0x20 || ch === 0x09 || ch === 0x0a || ch === 0x0d) {
+        cursor += 1;
+      } else {
+        break;
+      }
     }
+
+    if (cursor < buf.length && buf[cursor] === 0x28 /* '(' */) {
+      const start = cursor + 1;
+      const limit = Math.min(buf.length, start + MAX_INFO_VALUE_LENGTH);
+      let end = start;
+      let escaped = false;
+      let closed = false;
+
+      while (end < limit) {
+        const b = buf[end];
+        if (escaped) {
+          escaped = false;
+        } else if (b === 0x5c /* '\\' */) {
+          escaped = true;
+        } else if (b === 0x29 /* ')' */) {
+          closed = true;
+          break;
+        }
+        end += 1;
+      }
+
+      if (closed) {
+        const raw = buf.subarray(start, end).toString("latin1").trim();
+        if (raw !== "") {
+          values.push(decodePdfString(raw));
+        }
+        offset = end + 1;
+        continue;
+      }
+    }
+
+    offset = found + token.length;
   }
+
   return values;
 }
 
@@ -142,12 +237,13 @@ function decodePdfString(raw: string): string {
   return raw.replace(/\\([nrtbf()\\])/g, (_, ch: string) => escapes[ch] ?? ch);
 }
 
-function extractMetadata(text: string): DocumentMetadata {
-  const producers = infoValues(text, "Producer");
-  const creators = infoValues(text, "Creator");
-  const creationDates = infoValues(text, "CreationDate");
-  const modDates = infoValues(text, "ModDate");
-  const versionMatch = /^%PDF-(\d+\.\d+)/.exec(text);
+function extractMetadataFromBuffer(buf: Buffer): DocumentMetadata {
+  const producers = infoValuesFromBuffer(buf, "Producer");
+  const creators = infoValuesFromBuffer(buf, "Creator");
+  const creationDates = infoValuesFromBuffer(buf, "CreationDate");
+  const modDates = infoValuesFromBuffer(buf, "ModDate");
+  const headerSlice = buf.subarray(0, Math.min(buf.length, 32)).toString("latin1");
+  const versionMatch = /^%PDF-(\d+\.\d+)/.exec(headerSlice);
 
   return {
     // The last writer wins in a PDF with incremental updates, so the last
@@ -156,7 +252,7 @@ function extractMetadata(text: string): DocumentMetadata {
     creator: creators.at(-1) ?? null,
     creationDate: parsePdfDate(creationDates.at(-1)),
     modificationDate: parsePdfDate(modDates.at(-1)),
-    eofMarkers: (text.match(/%%EOF/g) ?? []).length,
+    eofMarkers: countTokenBytes(buf, EOF_TOKEN),
     pdfVersion: versionMatch?.[1] ?? null,
   };
 }
@@ -184,13 +280,32 @@ export function parsePdfDate(raw: string | undefined): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-function collectSignals(
-  text: string,
+function hasEncryptToken(buf: Buffer): boolean {
+  const token = Buffer.from("/Encrypt", "latin1");
+  let offset = 0;
+  while (offset <= buf.length - token.length) {
+    const idx = buf.indexOf(token, offset);
+    if (idx === -1) return false;
+    const nextByte = buf[idx + token.length];
+    const isWordBoundary =
+      nextByte === undefined ||
+      nextByte < 0x30 ||
+      (nextByte > 0x39 && nextByte < 0x41) ||
+      (nextByte > 0x5a && nextByte !== 0x5f && nextByte < 0x61) ||
+      nextByte > 0x7a;
+    if (isWordBoundary) return true;
+    offset = idx + token.length;
+  }
+  return false;
+}
+
+function collectSignalsFromBuffer(
+  buf: Buffer,
   metadata: DocumentMetadata,
   request: VerificationRequest,
 ): ForensicSignal[] {
   const signals: ForensicSignal[] = [];
-  const producers = infoValues(text, "Producer");
+  const producers = infoValuesFromBuffer(buf, "Producer");
 
   if (metadata.eofMarkers > 1) {
     signals.push({
@@ -245,8 +360,8 @@ function collectSignals(
 
   const overlays = OVERLAY_ANNOTATION_SUBTYPES.filter(
     (subtype) =>
-      text.includes(`/Subtype /${subtype}`) ||
-      text.includes(`/Subtype/${subtype}`),
+      buf.indexOf(Buffer.from(`/Subtype /${subtype}`, "latin1")) !== -1 ||
+      buf.indexOf(Buffer.from(`/Subtype/${subtype}`, "latin1")) !== -1,
   );
   if (overlays.length > 0) {
     signals.push({
@@ -256,7 +371,7 @@ function collectSignals(
     });
   }
 
-  if (/\/Encrypt\b/.test(text)) {
+  if (hasEncryptToken(buf)) {
     signals.push({
       code: "encrypted_document",
       detail:
