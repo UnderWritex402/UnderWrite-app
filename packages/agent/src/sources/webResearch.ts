@@ -34,6 +34,15 @@ export interface WebSearchProvider {
   readonly name: string;
 }
 
+/** Default maximum number of simultaneous search provider calls. */
+export const DEFAULT_MAX_CONCURRENCY = 3;
+
+/** Default base backoff (milliseconds) when retrying rate-limited queries. */
+export const DEFAULT_BASE_BACKOFF_MS = 100;
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Query suffixes appended to each party name. Kept explicit rather than
  * generated so the evidence report can state exactly what was asked, and so
@@ -132,7 +141,110 @@ const MITIGATING_KEYWORDS = [
 
 export interface WebResearchOptions {
   /** Findings below this confidence are dropped as too weak to report. */
-  minConfidence?: number;
+  minConfidence?: number | undefined;
+  /** Maximum number of provider requests allowed in flight at the same time. */
+  maxConcurrency?: number | undefined;
+  /** Maximum retry attempts per query on provider rate-limit responses. */
+  maxRetries?: number | undefined;
+  /** Base backoff in milliseconds when retrying rate-limited queries. */
+  baseBackoffMs?: number | undefined;
+  /** Injected sleep timer for deterministic backoff testing. */
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+}
+
+function isStructuredRateLimitError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const status = (error as { status?: unknown }).status;
+  const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
+  return status === 429 || typeof retryAfterMs === "number";
+}
+
+function isRateLimitError(error: unknown, explicitMaxRetries: boolean): boolean {
+  if (isStructuredRateLimitError(error)) return true;
+  if (!explicitMaxRetries) return false;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /rate[-_\s]?limit|\b429\b|too many requests/i.test(msg);
+}
+
+function extractRetryDelayMs(
+  error: unknown,
+  attempt: number,
+  baseBackoffMs: number,
+): number {
+  if (typeof error === "object" && error !== null) {
+    const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
+    if (typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+      return retryAfterMs;
+    }
+  }
+  return baseBackoffMs * 2 ** attempt;
+}
+
+async function searchWithBackoff(
+  provider: WebSearchProvider,
+  query: string,
+  options: {
+    maxRetries: number | undefined;
+    baseBackoffMs: number;
+    sleep: (ms: number) => Promise<void>;
+  },
+): Promise<SearchHit[]> {
+  const explicitMaxRetries = options.maxRetries !== undefined;
+  let attempt = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await provider.search(query);
+    } catch (error) {
+      const allowedRetries =
+        options.maxRetries ?? (isStructuredRateLimitError(error) ? 2 : 0);
+      if (
+        attempt >= allowedRetries ||
+        !isRateLimitError(error, explicitMaxRetries)
+      ) {
+        throw error;
+      }
+      const delayMs = extractRetryDelayMs(
+        error,
+        attempt,
+        options.baseBackoffMs,
+      );
+      attempt += 1;
+      await options.sleep(delayMs);
+    }
+  }
+}
+
+async function mapWithBoundedConcurrency<T, R>(
+  items: readonly T[],
+  maxConcurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(maxConcurrency));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  let aborted = false;
+
+  const runWorker = async (): Promise<void> => {
+    while (!aborted) {
+      const current = nextIndex;
+      if (current >= items.length) return;
+      nextIndex += 1;
+      const item = items[current];
+      if (item === undefined) return;
+      try {
+        results[current] = await worker(item, current);
+      } catch (error) {
+        aborted = true;
+        throw error;
+      }
+    }
+  };
+
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
 }
 
 export async function fetchWebResearch(
@@ -140,7 +252,19 @@ export async function fetchWebResearch(
   provider: WebSearchProvider,
   options: WebResearchOptions = {},
 ): Promise<SourceResult<WebResearchResult>> {
-  const { minConfidence = 35 } = options;
+  const {
+    minConfidence = 35,
+    maxConcurrency = DEFAULT_MAX_CONCURRENCY,
+    maxRetries,
+    baseBackoffMs = DEFAULT_BASE_BACKOFF_MS,
+    sleep = defaultSleep,
+  } = options;
+
+  if (!Number.isFinite(maxConcurrency) || maxConcurrency < 1) {
+    return unavailable(
+      `web research via ${provider.name} failed: maxConcurrency must be >= 1`,
+    );
+  }
 
   const plan: Array<{ subject: "buyer" | "seller"; name: string; query: string }> =
     [];
@@ -160,14 +284,20 @@ export async function fetchWebResearch(
 
   try {
     // A partially-completed sweep is not reported as a clean one. If any query
-    // fails, the whole source is unavailable: a sweep that silently skipped
-    // the seller would look identical to a seller with nothing against them,
-    // which is exactly the false confidence NFR-3 forbids.
-    const results = await Promise.all(
-      plan.map(async (item) => ({
+    // fails after exhausting allowed retries, the whole source is unavailable:
+    // a sweep that silently skipped the seller would look identical to a
+    // seller with nothing against them, which is the false confidence NFR-3 forbids.
+    const results = await mapWithBoundedConcurrency(
+      plan,
+      maxConcurrency,
+      async (item) => ({
         ...item,
-        hits: await provider.search(item.query),
-      })),
+        hits: await searchWithBackoff(provider, item.query, {
+          maxRetries,
+          baseBackoffMs,
+          sleep,
+        }),
+      }),
     );
 
     const findings = new Map<string, AdverseFinding>();
