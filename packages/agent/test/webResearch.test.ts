@@ -143,4 +143,97 @@ describe("fetchWebResearch", () => {
     const result = await fetchWebResearch(request("", ""), emptyProvider);
     expect(result.status).toBe("unavailable");
   });
+
+  it("caps simultaneous provider requests to the configured maxConcurrency", async () => {
+    let inFlight = 0;
+    let maxObserved = 0;
+    let totalCalls = 0;
+
+    const meteredProvider: WebSearchProvider = {
+      name: "metered",
+      search: async () => {
+        inFlight += 1;
+        totalCalls += 1;
+        if (inFlight > maxObserved) maxObserved = inFlight;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        return [];
+      },
+    };
+
+    const result = await fetchWebResearch(request(), meteredProvider, {
+      maxConcurrency: 2,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(totalCalls).toBe(12);
+    expect(maxObserved).toBeLessThanOrEqual(2);
+  });
+
+  it("backs off and recovers when a provider returns transient HTTP 429 rate-limit errors", async () => {
+    const delays: number[] = [];
+    let attemptsOnFirstQuery = 0;
+
+    const rateLimitedProvider: WebSearchProvider = {
+      name: "throttled",
+      search: async (query) => {
+        if (query.includes("fraud") && attemptsOnFirstQuery < 2) {
+          attemptsOnFirstQuery += 1;
+          throw Object.assign(new Error("HTTP 429 Too Many Requests"), {
+            status: 429,
+            retryAfterMs: attemptsOnFirstQuery * 25,
+          });
+        }
+        return [];
+      },
+    };
+
+    const result = await fetchWebResearch(request(), rateLimitedProvider, {
+      maxRetries: 2,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    expect(result.status).toBe("ok");
+    expect(attemptsOnFirstQuery).toBe(2);
+    expect(delays).toEqual([25, 50]);
+  });
+
+  it("degrades to unavailable without partial-success misreporting when rate-limit retries are exhausted", async () => {
+    const delays: number[] = [];
+    let sellerCalls = 0;
+
+    const exhaustedProvider: WebSearchProvider = {
+      name: "exhausted-provider",
+      search: async (query) => {
+        if (query.includes("Kanem Logistics")) {
+          sellerCalls += 1;
+          throw Object.assign(new Error("429 quota exceeded"), { status: 429 });
+        }
+        return [
+          {
+            title: "Zenith Foods Limited clean record",
+            url: "https://news.example/clean",
+            snippet: "No issues.",
+          },
+        ];
+      },
+    };
+
+    const result = await fetchWebResearch(request(), exhaustedProvider, {
+      maxConcurrency: 1,
+      maxRetries: 2,
+      baseBackoffMs: 10,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    expect(result.status).toBe("unavailable");
+    if (result.status !== "unavailable") return;
+    expect(result.reason).toContain("429 quota exceeded");
+    expect(sellerCalls).toBe(3);
+    expect(delays).toEqual([10, 20]);
+  });
 });
