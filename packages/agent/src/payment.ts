@@ -4,6 +4,8 @@ import {
   merchantAuthRefreshAction,
   merchantOrdersGetAction,
 } from "@goatnetwork/agentkit";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import { runAction } from "./goat/runtime.js";
 import type { GoatRuntime } from "./goat/runtime.js";
@@ -288,7 +290,7 @@ export async function requireSettledPayment(
   session: MerchantSession,
   runtime: GoatRuntime,
   orderId: string,
-  options: { expectedInvoiceId?: string } = {},
+  options: RequireSettledPaymentOptions = {},
 ): Promise<PaymentRecord> {
   const payment = await getOrder(session, runtime, orderId);
 
@@ -315,6 +317,22 @@ export async function requireSettledPayment(
       false,
       `order ${orderId} settled for invoice ${payment.invoiceId}, not ${options.expectedInvoiceId}`,
     );
+  }
+
+  if (options.consumptionStore !== undefined) {
+    const invoiceId = options.expectedInvoiceId ?? payment.invoiceId;
+    if (invoiceId === null || invoiceId === undefined || invoiceId === "") {
+      throw new PaymentError(
+        orderId,
+        payment.status,
+        false,
+        `order ${orderId} cannot be consumed without an invoice ID`,
+      );
+    }
+    await options.consumptionStore.claim(payment.orderId, invoiceId, {
+      resumeInProgress: options.resumeInProgress,
+      now: options.now,
+    });
   }
 
   return payment;
@@ -357,4 +375,370 @@ export async function handlePaymentWebhook(
 
   const payment = await getOrder(session, runtime, orderId);
   return payment.status === SETTLED ? payment : null;
+}
+
+export type PaymentConsumptionState = "in_progress" | "completed";
+
+export interface PaymentConsumptionRecord {
+  orderId: string;
+  invoiceId: string;
+  state: PaymentConsumptionState;
+  startedAt: string;
+  completedAt: string | null;
+  evidenceHash: string | null;
+}
+
+export interface ClaimConsumptionOptions {
+  /** Allow recovering an interrupted in-progress claim for the same invoice after restart. */
+  resumeInProgress?: boolean | undefined;
+  now?: (() => Date) | undefined;
+}
+
+export interface CompleteConsumptionOptions {
+  evidenceHash?: string | null | undefined;
+  now?: (() => Date) | undefined;
+}
+
+export interface PaymentConsumptionStore {
+  get(orderId: string): Promise<PaymentConsumptionRecord | null>;
+  claim(
+    orderId: string,
+    invoiceId: string,
+    options?: ClaimConsumptionOptions,
+  ): Promise<PaymentConsumptionRecord>;
+  complete(
+    orderId: string,
+    invoiceId: string,
+    options?: CompleteConsumptionOptions,
+  ): Promise<PaymentConsumptionRecord>;
+}
+
+export interface RequireSettledPaymentOptions {
+  expectedInvoiceId?: string | undefined;
+  consumptionStore?: PaymentConsumptionStore | undefined;
+  resumeInProgress?: boolean | undefined;
+  now?: (() => Date) | undefined;
+}
+
+const consumptionRecordSchema = z.object({
+  orderId: z.string().min(1),
+  invoiceId: z.string().min(1),
+  state: z.enum(["in_progress", "completed"]),
+  startedAt: z.string().min(1),
+  completedAt: z.string().nullable(),
+  evidenceHash: z.string().nullable(),
+});
+
+function sanitizeOrderKey(orderId: string): string {
+  const trimmed = orderId.trim();
+  if (trimmed === "" || !/^[a-zA-Z0-9._-]+$/.test(trimmed)) {
+    throw new PaymentError(
+      orderId,
+      "unknown",
+      false,
+      `invalid order ID "${orderId}" for consumption record storage`,
+    );
+  }
+  return trimmed;
+}
+
+function validateClaimTransition(
+  existing: PaymentConsumptionRecord,
+  orderId: string,
+  invoiceId: string,
+  isInFlightInWorker: boolean,
+  resumeInProgress: boolean,
+): PaymentConsumptionRecord {
+  if (existing.invoiceId !== invoiceId) {
+    throw new PaymentError(
+      orderId,
+      SETTLED,
+      false,
+      `order ${orderId} is already bound to invoice ${existing.invoiceId} and cannot unlock invoice ${invoiceId}`,
+    );
+  }
+
+  if (existing.state === "completed") {
+    throw new PaymentError(
+      orderId,
+      SETTLED,
+      false,
+      `order ${orderId} has already been consumed by a completed verification for invoice ${existing.invoiceId}`,
+    );
+  }
+
+  if (isInFlightInWorker || !resumeInProgress) {
+    throw new PaymentError(
+      orderId,
+      SETTLED,
+      false,
+      `order ${orderId} verification for invoice ${existing.invoiceId} is already in progress`,
+    );
+  }
+
+  return existing;
+}
+
+/**
+ * In-memory idempotency store for unit tests and single-process runs.
+ */
+export class MemoryPaymentConsumptionStore implements PaymentConsumptionStore {
+  private readonly records = new Map<string, PaymentConsumptionRecord>();
+  private readonly inFlight = new Set<string>();
+
+  constructor(initial: Iterable<PaymentConsumptionRecord> = []) {
+    for (const record of initial) {
+      this.records.set(record.orderId, { ...record });
+    }
+  }
+
+  async get(orderId: string): Promise<PaymentConsumptionRecord | null> {
+    const key = sanitizeOrderKey(orderId);
+    const existing = this.records.get(key);
+    return existing === undefined ? null : { ...existing };
+  }
+
+  async claim(
+    orderId: string,
+    invoiceId: string,
+    options: ClaimConsumptionOptions = {},
+  ): Promise<PaymentConsumptionRecord> {
+    const key = sanitizeOrderKey(orderId);
+    const existing = this.records.get(key);
+
+    if (existing !== undefined) {
+      const recovered = validateClaimTransition(
+        existing,
+        key,
+        invoiceId,
+        this.inFlight.has(key),
+        options.resumeInProgress ?? false,
+      );
+      this.inFlight.add(key);
+      return { ...recovered };
+    }
+
+    const now = options.now ?? (() => new Date());
+    const created: PaymentConsumptionRecord = {
+      orderId: key,
+      invoiceId,
+      state: "in_progress",
+      startedAt: now().toISOString(),
+      completedAt: null,
+      evidenceHash: null,
+    };
+    this.records.set(key, created);
+    this.inFlight.add(key);
+    return { ...created };
+  }
+
+  async complete(
+    orderId: string,
+    invoiceId: string,
+    options: CompleteConsumptionOptions = {},
+  ): Promise<PaymentConsumptionRecord> {
+    const key = sanitizeOrderKey(orderId);
+    const existing = this.records.get(key);
+    if (existing === undefined) {
+      throw new PaymentError(
+        key,
+        SETTLED,
+        false,
+        `cannot complete order ${key}: no in-progress payment consumption record exists`,
+      );
+    }
+    if (existing.invoiceId !== invoiceId) {
+      throw new PaymentError(
+        key,
+        SETTLED,
+        false,
+        `cannot complete order ${key} for invoice ${invoiceId}: bound to invoice ${existing.invoiceId}`,
+      );
+    }
+    if (existing.state === "completed") {
+      this.inFlight.delete(key);
+      return { ...existing };
+    }
+
+    const now = options.now ?? (() => new Date());
+    const updated: PaymentConsumptionRecord = {
+      ...existing,
+      state: "completed",
+      completedAt: now().toISOString(),
+      evidenceHash: options.evidenceHash ?? null,
+    };
+    this.records.set(key, updated);
+    this.inFlight.delete(key);
+    return { ...updated };
+  }
+
+  /** Simulates a worker crash in tests by dropping the in-memory lock while preserving persisted records. */
+  simulateRestart(): MemoryPaymentConsumptionStore {
+    return new MemoryPaymentConsumptionStore(this.records.values());
+  }
+}
+
+/**
+ * Durable filesystem-backed idempotency store.
+ *
+ * Uses an exclusive `.lock` file during claim/complete transitions and atomic
+ * temp-file renames so neither process crashes nor concurrent workers can
+ * unlock two verifications with the same settled order.
+ */
+export class FilePaymentConsumptionStore implements PaymentConsumptionStore {
+  private readonly directory: string;
+  private readonly inFlight = new Set<string>();
+
+  constructor(directory: string) {
+    this.directory = directory;
+  }
+
+  private recordPath(orderId: string): string {
+    return join(this.directory, `${sanitizeOrderKey(orderId)}.json`);
+  }
+
+  private lockPath(orderId: string): string {
+    return join(this.directory, `${sanitizeOrderKey(orderId)}.lock`);
+  }
+
+  private async withOrderLock<T>(orderId: string, fn: () => Promise<T>): Promise<T> {
+    await mkdir(this.directory, { recursive: true });
+    const lockFile = this.lockPath(orderId);
+    let handle;
+    try {
+      handle = await open(lockFile, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new PaymentError(
+          orderId,
+          SETTLED,
+          false,
+          `order ${orderId} is currently locked by a concurrent verification worker`,
+        );
+      }
+      throw error;
+    }
+
+    try {
+      return await fn();
+    } finally {
+      await handle.close().catch(() => undefined);
+      await rm(lockFile, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async readUnlocked(orderId: string): Promise<PaymentConsumptionRecord | null> {
+    try {
+      const raw = await readFile(this.recordPath(orderId), "utf8");
+      return consumptionRecordSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return null;
+      }
+      throw new PaymentError(
+        orderId,
+        "unknown",
+        false,
+        `corrupt payment consumption record for order ${orderId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async writeUnlocked(record: PaymentConsumptionRecord): Promise<void> {
+    const target = this.recordPath(record.orderId);
+    const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+    await rename(temp, target);
+  }
+
+  async get(orderId: string): Promise<PaymentConsumptionRecord | null> {
+    return this.readUnlocked(sanitizeOrderKey(orderId));
+  }
+
+  async claim(
+    orderId: string,
+    invoiceId: string,
+    options: ClaimConsumptionOptions = {},
+  ): Promise<PaymentConsumptionRecord> {
+    const key = sanitizeOrderKey(orderId);
+    return this.withOrderLock(key, async () => {
+      const existing = await this.readUnlocked(key);
+      if (existing !== null) {
+        const recovered = validateClaimTransition(
+          existing,
+          key,
+          invoiceId,
+          this.inFlight.has(key),
+          options.resumeInProgress ?? true,
+        );
+        this.inFlight.add(key);
+        return recovered;
+      }
+
+      const now = options.now ?? (() => new Date());
+      const created: PaymentConsumptionRecord = {
+        orderId: key,
+        invoiceId,
+        state: "in_progress",
+        startedAt: now().toISOString(),
+        completedAt: null,
+        evidenceHash: null,
+      };
+      await this.writeUnlocked(created);
+      this.inFlight.add(key);
+      return created;
+    });
+  }
+
+  async complete(
+    orderId: string,
+    invoiceId: string,
+    options: CompleteConsumptionOptions = {},
+  ): Promise<PaymentConsumptionRecord> {
+    const key = sanitizeOrderKey(orderId);
+    return this.withOrderLock(key, async () => {
+      const existing = await this.readUnlocked(key);
+      if (existing === null) {
+        throw new PaymentError(
+          key,
+          SETTLED,
+          false,
+          `cannot complete order ${key}: no in-progress payment consumption record exists`,
+        );
+      }
+      if (existing.invoiceId !== invoiceId) {
+        throw new PaymentError(
+          key,
+          SETTLED,
+          false,
+          `cannot complete order ${key} for invoice ${invoiceId}: bound to invoice ${existing.invoiceId}`,
+        );
+      }
+      if (existing.state === "completed") {
+        this.inFlight.delete(key);
+        return existing;
+      }
+
+      const now = options.now ?? (() => new Date());
+      const updated: PaymentConsumptionRecord = {
+        ...existing,
+        state: "completed",
+        completedAt: now().toISOString(),
+        evidenceHash: options.evidenceHash ?? null,
+      };
+      await this.writeUnlocked(updated);
+      this.inFlight.delete(key);
+      return updated;
+    });
+  }
+
+}
+
+export async function completePaymentConsumption(
+  store: PaymentConsumptionStore,
+  orderId: string,
+  invoiceId: string,
+  options: CompleteConsumptionOptions = {},
+): Promise<PaymentConsumptionRecord> {
+  return store.complete(orderId, invoiceId, options);
 }

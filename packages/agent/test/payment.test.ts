@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   MerchantSession,
@@ -5,6 +8,9 @@ import {
   getOrder,
   handlePaymentWebhook,
   requireSettledPayment,
+  FilePaymentConsumptionStore,
+  MemoryPaymentConsumptionStore,
+  completePaymentConsumption,
 } from "../src/payment.js";
 import type { GoatRuntime } from "../src/goat/runtime.js";
 import type { MerchantConfig } from "../src/config.js";
@@ -230,5 +236,173 @@ describe("handlePaymentWebhook", () => {
     ).toBeNull();
     expect(calls.orderReads).toBe(0);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("durable payment consumption (Issue #25)", () => {
+  it("prevents one settled order from unlocking two different invoice verifications", async () => {
+    const store = new MemoryPaymentConsumptionStore();
+    const { runtime } = stubRuntime({
+      orders: [
+        { id: "ord_100", status: "settled", amount: "2500", currency: "USDC" },
+        { id: "ord_100", status: "settled", amount: "2500", currency: "USDC" },
+      ],
+    });
+    const s = session(runtime);
+
+    await requireSettledPayment(s, runtime, "ord_100", {
+      expectedInvoiceId: "inv-A",
+      consumptionStore: store,
+    });
+
+    await expect(
+      requireSettledPayment(s, runtime, "ord_100", {
+        expectedInvoiceId: "inv-B",
+        consumptionStore: store,
+      }),
+    ).rejects.toThrow(/already bound to invoice inv-A/);
+  });
+
+  it("rejects reuse after a report is completed, including after process restart", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "underwrite-payment-store-"));
+    try {
+      const store1 = new FilePaymentConsumptionStore(dir);
+      const { runtime } = stubRuntime({
+        orders: [
+          {
+            id: "ord_200",
+            status: "settled",
+            metadata: { invoice_id: "inv-200" },
+          },
+          {
+            id: "ord_200",
+            status: "settled",
+            metadata: { invoice_id: "inv-200" },
+          },
+          {
+            id: "ord_200",
+            status: "settled",
+            metadata: { invoice_id: "inv-999" },
+          },
+        ],
+      });
+      const s = session(runtime);
+
+      await requireSettledPayment(s, runtime, "ord_200", {
+        expectedInvoiceId: "inv-200",
+        consumptionStore: store1,
+      });
+
+      const completed = await completePaymentConsumption(
+        store1,
+        "ord_200",
+        "inv-200",
+        { evidenceHash: "0xdeadbeef" },
+      );
+      expect(completed.state).toBe("completed");
+      expect(completed.evidenceHash).toBe("0xdeadbeef");
+
+      // Simulate restart with a fresh store reading from disk
+      const storeAfterRestart = new FilePaymentConsumptionStore(dir);
+      await expect(
+        requireSettledPayment(s, runtime, "ord_200", {
+          expectedInvoiceId: "inv-200",
+          consumptionStore: storeAfterRestart,
+        }),
+      ).rejects.toThrow(/already been consumed by a completed verification/);
+
+      await expect(
+        requireSettledPayment(s, runtime, "ord_200", {
+          expectedInvoiceId: "inv-999",
+          consumptionStore: storeAfterRestart,
+        }),
+      ).rejects.toThrow(/already bound to invoice inv-200/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes in-progress recovery after restart from concurrent duplicate workers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "underwrite-payment-recovery-"));
+    try {
+      const worker1Store = new FilePaymentConsumptionStore(dir);
+      const { runtime } = stubRuntime({
+        orders: [
+          {
+            id: "ord_300",
+            status: "settled",
+            metadata: { invoice_id: "inv-300" },
+          },
+          {
+            id: "ord_300",
+            status: "settled",
+            metadata: { invoice_id: "inv-300" },
+          },
+          {
+            id: "ord_300",
+            status: "settled",
+            metadata: { invoice_id: "inv-300" },
+          },
+        ],
+      });
+      const s = session(runtime);
+
+      await requireSettledPayment(s, runtime, "ord_300", {
+        expectedInvoiceId: "inv-300",
+        consumptionStore: worker1Store,
+      });
+
+      const inProgress = await worker1Store.get("ord_300");
+      expect(inProgress?.state).toBe("in_progress");
+
+      // While worker1 still holds the in-flight claim, duplicate call on the same worker is rejected
+      await expect(
+        requireSettledPayment(s, runtime, "ord_300", {
+          expectedInvoiceId: "inv-300",
+          consumptionStore: worker1Store,
+        }),
+      ).rejects.toThrow(/already in progress/);
+
+      // Simulate process crash and restart: new store instance recovers in-progress work for same invoice
+      const restartedStore = new FilePaymentConsumptionStore(dir);
+      const recovered = await requireSettledPayment(s, runtime, "ord_300", {
+        expectedInvoiceId: "inv-300",
+        consumptionStore: restartedStore,
+      });
+      expect(recovered.orderId).toBe("ord_300");
+
+      await completePaymentConsumption(restartedStore, "ord_300", "inv-300");
+      const finalRecord = await restartedStore.get("ord_300");
+      expect(finalRecord?.state).toBe("completed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows only one concurrent worker to claim a settled order", async () => {
+    const store = new MemoryPaymentConsumptionStore();
+    const { runtime } = stubRuntime({
+      orders: [
+        { id: "ord_400", status: "settled", metadata: { invoice_id: "inv-400" } },
+        { id: "ord_400", status: "settled", metadata: { invoice_id: "inv-400" } },
+      ],
+    });
+    const s = session(runtime);
+
+    const outcomes = await Promise.allSettled([
+      requireSettledPayment(s, runtime, "ord_400", {
+        expectedInvoiceId: "inv-400",
+        consumptionStore: store,
+      }),
+      requireSettledPayment(s, runtime, "ord_400", {
+        expectedInvoiceId: "inv-400",
+        consumptionStore: store,
+      }),
+    ]);
+
+    const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+    const rejected = outcomes.filter((o) => o.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
   });
 });
